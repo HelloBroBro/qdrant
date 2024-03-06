@@ -1,8 +1,10 @@
 use std::future::Future;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 
 use common::defaults;
+use parking_lot::Mutex;
 
 use super::Collection;
 use crate::operations::types::{CollectionError, CollectionResult};
@@ -11,7 +13,9 @@ use crate::shards::replica_set::ReplicaState;
 use crate::shards::shard::{PeerId, ShardId};
 use crate::shards::shard_holder::ShardHolder;
 use crate::shards::transfer;
-use crate::shards::transfer::transfer_tasks_pool::TaskResult;
+use crate::shards::transfer::transfer_tasks_pool::{
+    TaskResult, TransferTaskItem, TransferTaskProgress,
+};
 use crate::shards::transfer::{
     ShardTransfer, ShardTransferConsensus, ShardTransferKey, ShardTransferMethod,
 };
@@ -45,7 +49,10 @@ impl Collection {
     {
         // Select transfer method
         if shard_transfer.method.is_none() {
-            let method = ShardTransferMethod::default();
+            let method = self
+                .shared_storage_config
+                .default_shard_transfer_method
+                .unwrap_or_default();
             log::warn!("No shard transfer method selected, defaulting to {method:?}");
             shard_transfer.method.replace(method);
         }
@@ -74,7 +81,10 @@ impl Collection {
 
             let initial_state = match shard_transfer.method.unwrap_or_default() {
                 ShardTransferMethod::StreamRecords => ReplicaState::Partial,
-                ShardTransferMethod::Snapshot => ReplicaState::PartialSnapshot,
+                // TODO(1.9): switch into recovery state instead
+                ShardTransferMethod::Snapshot | ShardTransferMethod::WalDelta => {
+                    ReplicaState::PartialSnapshot
+                }
             };
 
             // Create local shard if it does not exist on receiver, or simply set replica state otherwise
@@ -89,6 +99,7 @@ impl Collection {
                     self.collection_config.clone(),
                     self.shared_storage_config.clone(),
                     self.update_runtime.clone(),
+                    self.optimizer_cpu_budget.clone(),
                 )
                 .await?;
 
@@ -118,9 +129,9 @@ impl Collection {
         OE: Future<Output = ()> + Send + 'static,
     {
         let mut active_transfer_tasks = self.transfer_tasks.lock().await;
-        let task_result = active_transfer_tasks.stop_if_exists(&transfer.key()).await;
+        let task_result = active_transfer_tasks.stop_task(&transfer.key()).await;
 
-        debug_assert_eq!(task_result, TaskResult::NotFound);
+        debug_assert!(task_result.is_none(), "Transfer task already exists");
         debug_assert!(
             transfer.method.is_some(),
             "When sending shard, a transfer method must have been selected",
@@ -130,8 +141,11 @@ impl Collection {
         let collection_id = self.id.clone();
         let channel_service = self.channel_service.clone();
 
+        let progress = Arc::new(Mutex::new(TransferTaskProgress::new()));
+
         let transfer_task = transfer::driver::spawn_transfer_task(
             shard_holder,
+            progress.clone(),
             transfer.clone(),
             consensus,
             collection_id,
@@ -143,7 +157,14 @@ impl Collection {
             on_error,
         );
 
-        active_transfer_tasks.add_task(&transfer, transfer_task);
+        active_transfer_tasks.add_task(
+            &transfer,
+            TransferTaskItem {
+                task: transfer_task,
+                started_at: chrono::Utc::now(),
+                progress,
+            },
+        );
     }
 
     /// Handles finishing of the shard transfer.
@@ -154,9 +175,9 @@ impl Collection {
             .transfer_tasks
             .lock()
             .await
-            .stop_if_exists(&transfer.key())
+            .stop_task(&transfer.key())
             .await
-            .is_finished();
+            == Some(TaskResult::Finished);
         log::debug!("transfer_finished: {transfer_finished}");
 
         let shards_holder_guard = self.shards_holder.read().await;
@@ -230,13 +251,12 @@ impl Collection {
     ) -> CollectionResult<()> {
         // TODO: Ensure cancel safety!
 
-        let _transfer_finished = self
+        let _transfer_result = self
             .transfer_tasks
             .lock()
             .await
-            .stop_if_exists(&transfer_key)
-            .await
-            .is_finished();
+            .stop_task(&transfer_key)
+            .await;
 
         let replica_set =
             if let Some(replica_set) = shard_holder_guard.get_shard(&transfer_key.shard_id) {
@@ -326,7 +346,7 @@ impl Collection {
                         |state| {
                             state
                                 .get_peer_state(&this_peer_id)
-                                .map_or(false, |peer_state| peer_state.is_partial_like())
+                                .map_or(false, |peer_state| peer_state.is_partial_or_recovery())
                         },
                         defaults::CONSENSUS_META_OP_WAIT,
                     )

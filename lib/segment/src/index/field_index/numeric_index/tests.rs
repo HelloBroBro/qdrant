@@ -6,7 +6,7 @@ use tempfile::{Builder, TempDir};
 
 use super::*;
 use crate::common::rocksdb_wrapper::open_db_with_existing_cf;
-use crate::common::utils::MultiValue;
+use crate::json_path::path;
 
 const COLUMN_NAME: &str = "test";
 
@@ -52,11 +52,14 @@ fn random_index(
     }
 }
 
-fn cardinality_request(index: &NumericIndex<f64>, query: Range) -> CardinalityEstimation {
-    let estimation = index.range_cardinality(&query);
+fn cardinality_request(
+    index: &NumericIndex<f64>,
+    query: Range<FloatPayloadType>,
+) -> CardinalityEstimation {
+    let estimation = index.range_cardinality(&RangeInterface::Float(query.clone()));
 
     let result = index
-        .filter(&FieldCondition::new_range("".to_string(), query))
+        .filter(&FieldCondition::new_range(path("unused"), query))
         .unwrap()
         .unique()
         .collect_vec();
@@ -79,9 +82,7 @@ fn test_set_empty_payload() {
     assert!(!value.is_empty());
 
     let payload = serde_json::json!(null);
-    index
-        .add_point(point_id, &MultiValue::one(&payload))
-        .unwrap();
+    index.add_point(point_id, &[&payload]).unwrap();
 
     let value = index.get_values(point_id).unwrap();
 
@@ -160,30 +161,22 @@ fn test_cardinality_exp(#[case] immutable: bool) {
 fn test_payload_blocks(#[case] immutable: bool) {
     let (_temp_dir, index) = random_index(1000, 2, immutable);
     let threshold = 100;
-    let blocks = index
-        .payload_blocks(threshold, "test".to_owned())
-        .collect_vec();
+    let blocks = index.payload_blocks(threshold, path("test")).collect_vec();
     assert!(!blocks.is_empty());
     eprintln!("threshold {threshold}, blocks.len() = {:#?}", blocks.len());
 
     let threshold = 500;
-    let blocks = index
-        .payload_blocks(threshold, "test".to_owned())
-        .collect_vec();
+    let blocks = index.payload_blocks(threshold, path("test")).collect_vec();
     assert!(!blocks.is_empty());
     eprintln!("threshold {threshold}, blocks.len() = {:#?}", blocks.len());
 
     let threshold = 1000;
-    let blocks = index
-        .payload_blocks(threshold, "test".to_owned())
-        .collect_vec();
+    let blocks = index.payload_blocks(threshold, path("test")).collect_vec();
     assert!(!blocks.is_empty());
     eprintln!("threshold {threshold}, blocks.len() = {:#?}", blocks.len());
 
     let threshold = 10000;
-    let blocks = index
-        .payload_blocks(threshold, "test".to_owned())
-        .collect_vec();
+    let blocks = index.payload_blocks(threshold, path("test")).collect_vec();
     assert!(!blocks.is_empty());
     eprintln!("threshold {threshold}, blocks.len() = {:#?}", blocks.len());
 }
@@ -228,9 +221,7 @@ fn test_payload_blocks_small(#[case] immutable: bool) {
         index
     };
 
-    let blocks = index
-        .payload_blocks(threshold, "test".to_owned())
-        .collect_vec();
+    let blocks = index.payload_blocks(threshold, path("test")).collect_vec();
     assert!(!blocks.is_empty());
 }
 
@@ -376,23 +367,13 @@ fn test_numeric_index(#[case] immutable: bool) {
     );
 }
 
-fn test_cond<T: Encodable + Numericable + PartialOrd + Clone>(
+fn test_cond<T: Encodable + Numericable + PartialOrd + Clone + Default>(
     index: &NumericIndex<T>,
-    rng: Range,
+    rng: Range<FloatPayloadType>,
     result: Vec<u32>,
 ) {
-    let condition = FieldCondition {
-        key: "".to_string(),
-        r#match: None,
-        range: Some(rng),
-        geo_bounding_box: None,
-        geo_radius: None,
-        values_count: None,
-        geo_polygon: None,
-    };
-
+    let condition = FieldCondition::new_range(path("unused"), rng);
     let offsets = index.filter(&condition).unwrap().collect_vec();
-
     assert_eq!(offsets, result);
 }
 

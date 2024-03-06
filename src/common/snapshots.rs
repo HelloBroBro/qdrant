@@ -3,6 +3,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use collection::collection::Collection;
+use collection::common::sha_256::hash_file;
 use collection::operations::snapshot_ops::{
     ShardSnapshotLocation, SnapshotDescription, SnapshotPriority,
 };
@@ -57,9 +58,10 @@ pub async fn delete_shard_snapshot(
     let snapshot_path = collection
         .get_shard_snapshot_path(shard_id, &snapshot_name)
         .await?;
-
+    let snapshot_manager = collection.get_snapshots_storage_manager();
     check_shard_snapshot_file_exists(&snapshot_path)?;
-    tokio::fs::remove_file(&snapshot_path).await?;
+
+    let _task = tokio::spawn(async move { snapshot_manager.delete_snapshot(&snapshot_path).await });
 
     Ok(())
 }
@@ -73,6 +75,7 @@ pub async fn recover_shard_snapshot(
     shard_id: ShardId,
     snapshot_location: ShardSnapshotLocation,
     snapshot_priority: SnapshotPriority,
+    checksum: Option<String>,
     client: HttpClient,
 ) -> Result<(), StorageError> {
     // - `download_dir` handled by `tempfile` and would be deleted, if request is cancelled
@@ -113,6 +116,15 @@ pub async fn recover_shard_snapshot(
                     (snapshot_path, None)
                 }
             };
+
+            if let Some(checksum) = checksum {
+                let snapshot_checksum = hash_file(&snapshot_path).await?;
+                if snapshot_checksum != checksum {
+                    return Err(StorageError::bad_input(format!(
+                        "Snapshot checksum mismatch: expected {checksum}, got {snapshot_checksum}"
+                    )));
+                }
+            }
 
             Result::<_, StorageError>::Ok((
                 collection,

@@ -4,6 +4,7 @@ use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
 use atomic_refcell::AtomicRefCell;
+use common::cpu::CpuPermit;
 use common::types::{ScoreType, ScoredPointOffset};
 use rand::rngs::StdRng;
 use rand::SeedableRng;
@@ -12,6 +13,7 @@ use segment::entry::entry_point::SegmentEntry;
 use segment::fixtures::payload_fixtures::{random_vector, STR_KEY};
 use segment::index::hnsw_index::graph_links::GraphLinksRam;
 use segment::index::hnsw_index::hnsw::HNSWIndex;
+use segment::index::hnsw_index::num_rayon_threads;
 use segment::index::{VectorIndex, VectorIndexEnum};
 use segment::segment::Segment;
 use segment::segment_constructor::build_segment;
@@ -27,6 +29,7 @@ use serde_json::json;
 use tempfile::Builder;
 
 use crate::fixtures::segment::build_segment_1;
+use crate::utils::path;
 
 fn sames_count(a: &[Vec<ScoredPointOffset>], b: &[Vec<ScoredPointOffset>]) -> usize {
     a[0].iter()
@@ -85,7 +88,7 @@ fn hnsw_quantized_search_test(
     }
 
     segment
-        .create_field_index(op_num, STR_KEY, Some(&Keyword.into()))
+        .create_field_index(op_num, &path(STR_KEY), Some(&Keyword.into()))
         .unwrap();
     op_num += 1;
     for n in 0..payloads_count {
@@ -121,6 +124,9 @@ fn hnsw_quantized_search_test(
         payload_m: None,
     };
 
+    let permit_cpu_count = num_rayon_threads(hnsw_config.max_indexing_threads);
+    let permit = Arc::new(CpuPermit::dummy(permit_cpu_count as u32));
+
     let mut hnsw_index = HNSWIndex::<GraphLinksRam>::open(
         hnsw_dir.path(),
         segment.id_tracker.clone(),
@@ -135,13 +141,13 @@ fn hnsw_quantized_search_test(
     )
     .unwrap();
 
-    hnsw_index.build_index(&stopped).unwrap();
+    hnsw_index.build_index(permit, &stopped).unwrap();
 
     let query_vectors = (0..attempts)
         .map(|_| random_vector(&mut rnd, dim).into())
         .collect::<Vec<_>>();
     let filter = Filter::new_must(Condition::Field(FieldCondition::new_match(
-        STR_KEY,
+        path(STR_KEY),
         STR_KEY.to_owned().into(),
     )));
 
@@ -414,11 +420,14 @@ fn test_build_hnsw_using_quantization() {
         payload_m: None,
     });
 
+    let permit_cpu_count = num_rayon_threads(0);
+    let permit = CpuPermit::dummy(permit_cpu_count as u32);
+
     let mut builder = SegmentBuilder::new(dir.path(), temp_dir.path(), &config).unwrap();
 
     builder.update_from(&segment1, &stopped).unwrap();
 
-    let built_segment: Segment = builder.build(&stopped).unwrap();
+    let built_segment: Segment = builder.build(permit, &stopped).unwrap();
 
     // check if built segment has quantization and index
     assert!(built_segment.vector_data[DEFAULT_VECTOR_NAME]

@@ -1,6 +1,15 @@
 #@ load("openapi.lib.yml", "response", "reference", "type", "array")
 
 paths:
+  /:
+    get:
+      summary: Returns information about the running Qdrant instance
+      description: Returns information about the running Qdrant instance like version and commit id
+      operationId: root
+      tags:
+        - service
+      responses: #@ response(reference("VersionInfo"))
+
   /telemetry:
     get:
       summary: Collect telemetry data
@@ -32,7 +41,7 @@ paths:
           schema:
             type: boolean
       responses:
-        '200':
+        "200":
           description: Metrics data in Prometheus format
           content:
             text/plain:
@@ -48,7 +57,7 @@ paths:
                   # HELP collections_total number of collections
                   # TYPE collections_total gauge
                   collections_total 1
-        '4XX':
+        "4XX":
           description: error
 
   /locks:
@@ -82,14 +91,14 @@ paths:
       tags:
         - service
       responses:
-        '200':
+        "200":
           description: Healthz response
           content:
             text/plain:
               schema:
                 type: string
                 example: healthz check passed
-        '4XX':
+        "4XX":
           description: error
 
   /livez:
@@ -100,14 +109,14 @@ paths:
       tags:
         - service
       responses:
-        '200':
+        "200":
           description: Healthz response
           content:
             text/plain:
               schema:
                 type: string
                 example: healthz check passed
-        '4XX':
+        "4XX":
           description: error
 
   /readyz:
@@ -118,12 +127,13 @@ paths:
       tags:
         - service
       responses:
-        '200':
+        "200":
           description: Healthz response
           content:
             text/plain:
               schema:
                 type: string
                 example: healthz check passed
-        '4XX':
+        "4XX":
           description: error
+

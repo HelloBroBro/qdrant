@@ -1,10 +1,11 @@
 use std::time::Duration;
 
 use api::grpc::models::{CollectionDescription, CollectionsResponse};
+use api::grpc::qdrant::CollectionExists;
 use collection::config::ShardingMethod;
 use collection::operations::cluster_ops::{
     AbortTransferOperation, ClusterOperations, DropReplicaOperation, MoveShardOperation,
-    ReplicateShardOperation,
+    ReplicateShardOperation, RestartTransfer, RestartTransferOperation,
 };
 use collection::operations::shard_selector_internal::ShardSelectorInternal;
 use collection::operations::snapshot_ops::SnapshotDescription;
@@ -13,16 +14,32 @@ use collection::operations::types::{
 };
 use collection::shards::replica_set;
 use collection::shards::shard::{PeerId, ShardId, ShardsPlacement};
-use collection::shards::transfer::{ShardTransfer, ShardTransferKey};
+use collection::shards::transfer::{ShardTransfer, ShardTransferKey, ShardTransferRestart};
 use itertools::Itertools;
 use rand::prelude::SliceRandom;
 use storage::content_manager::collection_meta_ops::ShardTransferOperations::{Abort, Start};
 use storage::content_manager::collection_meta_ops::{
-    CollectionMetaOperations, CreateShardKey, DropShardKey, UpdateCollectionOperation,
+    CollectionMetaOperations, CreateShardKey, DropShardKey, ShardTransferOperations,
+    UpdateCollectionOperation,
 };
 use storage::content_manager::errors::StorageError;
 use storage::content_manager::toc::TableOfContent;
 use storage::dispatcher::Dispatcher;
+
+pub async fn do_collection_exists(
+    toc: &TableOfContent,
+    name: &str,
+) -> Result<CollectionExists, StorageError> {
+    // if this returns Ok, it means the collection exists.
+    // if not, we check that the error is NotFound
+    let Err(error) = toc.get_collection(name).await else {
+        return Ok(CollectionExists { exists: true });
+    };
+    match error {
+        StorageError::NotFound { .. } => Ok(CollectionExists { exists: false }),
+        e => Err(e),
+    }
+}
 
 pub async fn do_get_collection(
     toc: &TableOfContent,
@@ -136,6 +153,7 @@ pub async fn do_create_snapshot(
             name: "".to_string(),
             creation_time: None,
             size: 0,
+            checksum: None,
         })
     }
 }
@@ -416,6 +434,44 @@ pub async fn do_update_collection_cluster(
                         collection_name,
                         shard_key: drop_sharding_key.shard_key,
                     }),
+                    wait_timeout,
+                )
+                .await
+        }
+        ClusterOperations::RestartTransfer(RestartTransferOperation { restart_transfer }) => {
+            let RestartTransfer {
+                shard_id,
+                from_peer_id,
+                to_peer_id,
+                method,
+            } = restart_transfer;
+
+            let transfer_key = ShardTransferKey {
+                shard_id,
+                to: to_peer_id,
+                from: from_peer_id,
+            };
+
+            if !collection.check_transfer_exists(&transfer_key).await {
+                return Err(StorageError::NotFound {
+                    description: format!(
+                        "Shard transfer {} -> {} for collection {}:{} does not exist",
+                        transfer_key.from, transfer_key.to, collection_name, transfer_key.shard_id
+                    ),
+                });
+            }
+
+            dispatcher
+                .submit_collection_meta_op(
+                    CollectionMetaOperations::TransferShard(
+                        collection_name,
+                        ShardTransferOperations::Restart(ShardTransferRestart {
+                            shard_id,
+                            to: to_peer_id,
+                            from: from_peer_id,
+                            method,
+                        }),
+                    ),
                     wait_timeout,
                 )
                 .await

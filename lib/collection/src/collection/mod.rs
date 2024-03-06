@@ -13,6 +13,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
+use common::cpu::CpuBudget;
+use common::types::TelemetryDetail;
 use segment::common::version::StorageVersion;
 use segment::types::ShardKey;
 use semver::Version;
@@ -28,12 +30,13 @@ use crate::operations::types::{CollectionError, CollectionResult, NodeType};
 use crate::save_on_disk::SaveOnDisk;
 use crate::shards::channel_service::ChannelService;
 use crate::shards::collection_shard_distribution::CollectionShardDistribution;
+use crate::shards::local_shard::clock_map::RecoveryPoint;
 use crate::shards::replica_set::ReplicaState::{Active, Dead, Initializing, Listener};
 use crate::shards::replica_set::{ChangePeerState, ReplicaState, ShardReplicaSet};
 use crate::shards::shard::{PeerId, ShardId};
 use crate::shards::shard_holder::{shard_not_found_error, LockedShardHolder, ShardHolder};
 use crate::shards::transfer::helpers::check_transfer_conflicts_strict;
-use crate::shards::transfer::transfer_tasks_pool::TransferTasksPool;
+use crate::shards::transfer::transfer_tasks_pool::{TaskResult, TransferTasksPool};
 use crate::shards::transfer::ShardTransfer;
 use crate::shards::{replica_set, CollectionId};
 use crate::telemetry::CollectionTelemetry;
@@ -61,11 +64,12 @@ pub struct Collection {
     // Lock to temporary block collection update operations while the collection is being migrated.
     // Lock is acquired for read on update operation and can be acquired for write externally,
     // which will block all update operations until the lock is released.
-    updates_lock: RwLock<()>,
+    updates_lock: Arc<RwLock<()>>,
     // Update runtime handle.
     update_runtime: Handle,
     // Search runtime handle.
     search_runtime: Handle,
+    optimizer_cpu_budget: CpuBudget,
 }
 
 pub type RequestShardTransfer = Arc<dyn Fn(ShardTransfer) + Send + Sync>;
@@ -89,6 +93,7 @@ impl Collection {
         abort_shard_transfer: replica_set::AbortShardTransfer,
         search_runtime: Option<Handle>,
         update_runtime: Option<Handle>,
+        optimizer_cpu_budget: CpuBudget,
     ) -> Result<Self, CollectionError> {
         let start_time = std::time::Instant::now();
 
@@ -112,6 +117,7 @@ impl Collection {
                 channel_service.clone(),
                 update_runtime.clone().unwrap_or_else(Handle::current),
                 search_runtime.clone().unwrap_or_else(Handle::current),
+                optimizer_cpu_budget.clone(),
                 None,
             )
             .await?;
@@ -142,10 +148,11 @@ impl Collection {
             notify_peer_failure_cb: on_replica_failure.clone(),
             abort_shard_transfer_cb: abort_shard_transfer,
             init_time: start_time.elapsed(),
-            is_initialized: Arc::new(Default::default()),
-            updates_lock: RwLock::new(()),
+            is_initialized: Default::default(),
+            updates_lock: Default::default(),
             update_runtime: update_runtime.unwrap_or_else(Handle::current),
             search_runtime: search_runtime.unwrap_or_else(Handle::current),
+            optimizer_cpu_budget,
         })
     }
 
@@ -162,6 +169,7 @@ impl Collection {
         abort_shard_transfer: replica_set::AbortShardTransfer,
         search_runtime: Option<Handle>,
         update_runtime: Option<Handle>,
+        optimizer_cpu_budget: CpuBudget,
     ) -> Self {
         let start_time = std::time::Instant::now();
         let stored_version = CollectionVersion::load(path)
@@ -213,6 +221,7 @@ impl Collection {
                 this_peer_id,
                 update_runtime.clone().unwrap_or_else(Handle::current),
                 search_runtime.clone().unwrap_or_else(Handle::current),
+                optimizer_cpu_budget.clone(),
             )
             .await;
 
@@ -236,10 +245,11 @@ impl Collection {
             notify_peer_failure_cb: on_replica_failure,
             abort_shard_transfer_cb: abort_shard_transfer,
             init_time: start_time.elapsed(),
-            is_initialized: Arc::new(Default::default()),
-            updates_lock: RwLock::new(()),
+            is_initialized: Default::default(),
+            updates_lock: Default::default(),
             update_runtime: update_runtime.unwrap_or_else(Handle::current),
             search_runtime: search_runtime.unwrap_or_else(Handle::current),
+            optimizer_cpu_budget,
         }
     }
 
@@ -393,6 +403,36 @@ impl Collection {
         Ok(())
     }
 
+    pub async fn shard_recovery_point(&self, shard_id: ShardId) -> CollectionResult<RecoveryPoint> {
+        let shard_holder_read = self.shards_holder.read().await;
+
+        let shard = shard_holder_read.get_shard(&shard_id);
+        let Some(replica_set) = shard else {
+            return Err(CollectionError::NotFound {
+                what: "Shard {shard_id}".into(),
+            });
+        };
+
+        replica_set.shard_recovery_point().await
+    }
+
+    pub async fn update_shard_cutoff_point(
+        &self,
+        shard_id: ShardId,
+        cutoff: &RecoveryPoint,
+    ) -> CollectionResult<()> {
+        let shard_holder_read = self.shards_holder.read().await;
+
+        let shard = shard_holder_read.get_shard(&shard_id);
+        let Some(replica_set) = shard else {
+            return Err(CollectionError::NotFound {
+                what: "Shard {shard_id}".into(),
+            });
+        };
+
+        replica_set.update_shard_cutoff_point(cutoff).await
+    }
+
     pub async fn state(&self) -> State {
         let shards_holder = self.shards_holder.read().await;
         let transfers = shards_holder.shard_transfers.read().clone();
@@ -445,24 +485,26 @@ impl Collection {
         let outgoing_transfers = shard_holder.get_outgoing_transfers(&self.this_peer_id);
         let tasks_lock = self.transfer_tasks.lock().await;
         for transfer in outgoing_transfers {
-            match tasks_lock.get_task_result(&transfer.key()) {
+            match tasks_lock
+                .get_task_status(&transfer.key())
+                .map(|s| s.result)
+            {
                 None => {
-                    if !tasks_lock.check_if_still_running(&transfer.key()) {
-                        log::debug!(
-                            "Transfer {:?} does not exist, but not reported as cancelled. Reporting now.",
-                            transfer.key()
-                        );
-                        on_transfer_failure(transfer, self.name(), "transfer task does not exist");
-                    }
+                    log::debug!(
+                        "Transfer {:?} does not exist, but not reported as cancelled. Reporting now.",
+                        transfer.key()
+                    );
+                    on_transfer_failure(transfer, self.name(), "transfer task does not exist");
                 }
-                Some(true) => {
+                Some(TaskResult::Running) => (),
+                Some(TaskResult::Finished) => {
                     log::debug!(
                         "Transfer {:?} is finished successfully, but not reported. Reporting now.",
                         transfer.key()
                     );
                     on_transfer_success(transfer, self.name());
                 }
-                Some(false) => {
+                Some(TaskResult::Failed) => {
                     log::debug!(
                         "Transfer {:?} is failed, but not reported as failed. Reporting now.",
                         transfer.key()
@@ -528,7 +570,12 @@ impl Collection {
                     to: *this_peer_id,
                     shard_id,
                     sync: true,
-                    method: None,
+                    // For automatic shard transfers, always select some default method from this point on
+                    method: Some(
+                        self.shared_storage_config
+                            .default_shard_transfer_method
+                            .unwrap_or_default(),
+                    ),
                 };
 
                 if check_transfer_conflicts_strict(&transfer, transfers.iter()).is_some() {
@@ -572,14 +619,17 @@ impl Collection {
         Ok(())
     }
 
-    pub async fn get_telemetry_data(&self) -> CollectionTelemetry {
+    pub async fn get_telemetry_data(&self, detail: TelemetryDetail) -> CollectionTelemetry {
         let (shards_telemetry, transfers) = {
             let mut shards_telemetry = Vec::new();
             let shards_holder = self.shards_holder.read().await;
             for shard in shards_holder.all_shards() {
-                shards_telemetry.push(shard.get_telemetry_data().await)
+                shards_telemetry.push(shard.get_telemetry_data(detail).await)
             }
-            (shards_telemetry, shards_holder.get_shard_transfer_info())
+            (
+                shards_telemetry,
+                shards_holder.get_shard_transfer_info(&*self.transfer_tasks.lock().await),
+            )
         };
 
         CollectionTelemetry {
@@ -601,6 +651,10 @@ impl Collection {
 
     pub fn request_shard_transfer(&self, shard_transfer: ShardTransfer) {
         self.request_shard_transfer_cb.deref()(shard_transfer)
+    }
+
+    pub fn shared_storage_config(&self) -> Arc<SharedStorageConfig> {
+        self.shared_storage_config.clone()
     }
 }
 

@@ -21,7 +21,7 @@ use crate::types::{
     ScalarQuantizationConfig,
 };
 #[cfg(target_os = "linux")]
-use crate::vector_storage::memmap_vector_storage::open_memmap_vector_storage_with_async_io;
+use crate::vector_storage::memmap_dense_vector_storage::open_memmap_vector_storage_with_async_io;
 use crate::vector_storage::quantized::quantized_vectors::QuantizedVectors;
 use crate::vector_storage::query::context_query::{ContextPair, ContextQuery};
 use crate::vector_storage::query::discovery_query::DiscoveryQuery;
@@ -117,6 +117,7 @@ fn ram_storage(dir: &Path) -> AtomicRefCell<VectorStorageEnum> {
         rocksdb_wrapper::DB_VECTOR_CF,
         DIMS,
         DISTANCE,
+        &AtomicBool::new(false),
     )
     .unwrap();
 
@@ -196,8 +197,13 @@ fn scoring_equivalency(
 
     let db = rocksdb_wrapper::open_db(raw_dir.path(), &[rocksdb_wrapper::DB_VECTOR_CF])?;
 
-    let raw_storage =
-        open_simple_vector_storage(db, rocksdb_wrapper::DB_VECTOR_CF, DIMS, DISTANCE)?;
+    let raw_storage = open_simple_vector_storage(
+        db,
+        rocksdb_wrapper::DB_VECTOR_CF,
+        DIMS,
+        DISTANCE,
+        &AtomicBool::default(),
+    )?;
 
     let mut raw_storage = raw_storage.borrow_mut();
 
@@ -326,7 +332,6 @@ fn compare_scoring_equivalency(
     #[values(ram_storage)] other_storage: impl FnOnce(
         &std::path::Path,
     ) -> AtomicRefCell<VectorStorageEnum>,
-
     #[values(None, product_x4(), scalar_u8(), binary())] quantization_config: Option<
         WithQuantization,
     >,
@@ -343,7 +348,6 @@ fn async_compare_scoring_equivalency(
         QueryVariant::Context
     )]
     query_variant: QueryVariant,
-
     #[values(async_memmap_storage)] other_storage: impl FnOnce(
         &std::path::Path,
     ) -> AtomicRefCell<VectorStorageEnum>,

@@ -3,11 +3,12 @@ use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
+use common::cpu::CpuPermit;
 use itertools::Itertools;
 use parking_lot::{Mutex, RwLock, RwLockUpgradableReadGuard};
 use segment::common::operation_error::check_process_stopped;
 use segment::common::operation_time_statistics::{
-    OperationDurationStatistics, OperationDurationsAggregator, ScopeDurationMeasurer,
+    OperationDurationsAggregator, ScopeDurationMeasurer,
 };
 use segment::common::version::StorageVersion;
 use segment::entry::entry_point::SegmentEntry;
@@ -74,9 +75,7 @@ pub trait SegmentOptimizer {
         excluded_ids: &HashSet<SegmentId>,
     ) -> Vec<SegmentId>;
 
-    fn get_telemetry_data(&self) -> OperationDurationStatistics;
-
-    fn get_telemetry_counter(&self) -> Arc<Mutex<OperationDurationsAggregator>>;
+    fn get_telemetry_counter(&self) -> &Mutex<OperationDurationsAggregator>;
 
     /// Build temp segment
     fn temp_segment(&self, save_version: bool) -> CollectionResult<LockedSegment> {
@@ -348,6 +347,7 @@ pub trait SegmentOptimizer {
         proxy_deleted_points: Arc<RwLock<HashSet<PointIdType>>>,
         proxy_deleted_indexes: Arc<RwLock<HashSet<PayloadKeyType>>>,
         proxy_created_indexes: Arc<RwLock<HashMap<PayloadKeyType, PayloadFieldSchema>>>,
+        permit: CpuPermit,
         stopped: &AtomicBool,
     ) -> CollectionResult<Segment> {
         let mut segment_builder = self.optimized_segment_builder(optimizing_segments)?;
@@ -373,7 +373,7 @@ pub trait SegmentOptimizer {
                 .insert(field.to_owned(), schema_type.to_owned());
         }
 
-        let mut optimized_segment: Segment = segment_builder.build(stopped)?;
+        let mut optimized_segment: Segment = segment_builder.build(permit, stopped)?;
 
         // Delete points in 2 steps
         // First step - delete all points with read lock
@@ -429,11 +429,12 @@ pub trait SegmentOptimizer {
         &self,
         segments: LockedSegmentHolder,
         ids: Vec<SegmentId>,
+        permit: CpuPermit,
         stopped: &AtomicBool,
     ) -> CollectionResult<bool> {
         check_process_stopped(stopped)?;
 
-        let mut timer = ScopeDurationMeasurer::new(&self.get_telemetry_counter());
+        let mut timer = ScopeDurationMeasurer::new(self.get_telemetry_counter());
         timer.set_success(false);
 
         // On the one hand - we want to check consistently if all provided segments are
@@ -526,6 +527,7 @@ pub trait SegmentOptimizer {
             proxy_deleted_points.clone(),
             proxy_deleted_indexes.clone(),
             proxy_created_indexes.clone(),
+            permit,
             stopped,
         ) {
             Ok(segment) => segment,

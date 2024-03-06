@@ -10,15 +10,18 @@ use api::grpc::transport_channel_pool::RequestError;
 use common::types::ScoreType;
 use common::validation::validate_range_generic;
 use io::file_operations::FileStorageError;
+use issues::IssueRecord;
 use merge::Merge;
 use schemars::JsonSchema;
 use segment::common::anonymize::Anonymize;
 use segment::common::operation_error::OperationError;
 use segment::data_types::groups::GroupId;
+use segment::data_types::order_by::OrderBy;
 use segment::data_types::vectors::{
-    DenseVector, Named, NamedQuery, NamedVectorStruct, QueryVector, Vector, VectorElementType,
-    VectorRef, VectorStruct, DEFAULT_VECTOR_NAME,
+    DenseVector, Named, NamedQuery, NamedVectorStruct, QueryVector, Vector, VectorRef,
+    VectorStruct, DEFAULT_VECTOR_NAME,
 };
+use segment::json_path::{JsonPath, JsonPathInterface};
 use segment::types::{
     Distance, Filter, Payload, PayloadIndexInfo, PayloadKeyType, PointIdType, QuantizationConfig,
     ScoredPoint, SearchParams, SeqNumberType, ShardKey, WithPayloadInterface, WithVector,
@@ -38,6 +41,7 @@ use tonic::codegen::http::uri::InvalidUri;
 use validator::{Validate, ValidationError, ValidationErrors};
 
 use super::config_diff::{self};
+use super::ClockTag;
 use crate::config::{CollectionConfig, CollectionParams};
 use crate::lookup::types::WithLookupInterface;
 use crate::operations::config_diff::{HnswConfigDiff, QuantizationConfigDiff};
@@ -50,9 +54,7 @@ use crate::wal::WalError;
 
 /// Current state of the collection.
 /// `Green` - all good. `Yellow` - optimization is running, `Red` - some operations failed and was not recovered
-#[derive(
-    Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord, Copy, Clone,
-)]
+#[derive(Debug, Serialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord, Copy, Clone)]
 #[serde(rename_all = "snake_case")]
 pub enum CollectionStatus {
     // Collection if completely ready for requests
@@ -64,10 +66,15 @@ pub enum CollectionStatus {
     Red,
 }
 
+/// State of existence of a collection,
+/// true = exists, false = does not exist
+#[derive(Debug, Serialize, JsonSchema, Clone)]
+pub struct CollectionExistence {
+    pub exists: bool,
+}
+
 /// Current state of the collection
-#[derive(
-    Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord, Clone,
-)]
+#[derive(Debug, Default, Serialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord, Clone)]
 #[serde(rename_all = "snake_case")]
 pub enum OptimizersStatus {
     /// Optimizers are reporting as expected
@@ -78,7 +85,7 @@ pub enum OptimizersStatus {
 }
 
 /// Point data
-#[derive(Clone, Debug, PartialEq, Deserialize, Serialize, JsonSchema)]
+#[derive(Clone, Debug, PartialEq, Serialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub struct Record {
     /// Id of the point
@@ -88,12 +95,12 @@ pub struct Record {
     /// Vector of the point
     pub vector: Option<VectorStruct>,
     /// Shard Key
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub shard_key: Option<ShardKey>,
 }
 
 /// Current statistics and configuration of the collection
-#[derive(Debug, Deserialize, Serialize, JsonSchema, Validate)]
+#[derive(Debug, Serialize, JsonSchema)]
 pub struct CollectionInfo {
     /// Status of the collection
     pub status: CollectionStatus,
@@ -115,7 +122,6 @@ pub struct CollectionInfo {
     /// Each segment has independent vector as payload indexes
     pub segments_count: usize,
     /// Collection settings
-    #[validate]
     pub config: CollectionConfig,
     /// Types of stored payload
     pub payload_schema: HashMap<PayloadKeyType, PayloadIndexInfo>,
@@ -180,7 +186,7 @@ pub struct CollectionInfoInternal {
 }
 
 /// Current clustering distribution for the collection
-#[derive(Debug, Deserialize, Serialize, JsonSchema)]
+#[derive(Debug, Serialize, JsonSchema)]
 pub struct CollectionClusterInfo {
     /// ID of this peer
     pub peer_id: PeerId,
@@ -194,19 +200,29 @@ pub struct CollectionClusterInfo {
     pub shard_transfers: Vec<ShardTransferInfo>,
 }
 
-#[derive(Debug, Deserialize, Serialize, JsonSchema, Clone)]
+#[derive(Debug, Serialize, JsonSchema, Clone)]
 pub struct ShardTransferInfo {
     pub shard_id: ShardId,
+
+    /// Source peer id
     pub from: PeerId,
+
+    /// Destination peer id
     pub to: PeerId,
+
     /// If `true` transfer is a synchronization of a replicas
     /// If `false` transfer is a moving of a shard from one peer to another
     pub sync: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub method: Option<ShardTransferMethod>,
+
+    /// A human-readable report of the transfer progress. Available only on the source peer.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub comment: Option<String>,
 }
 
-#[derive(Debug, Deserialize, Serialize, JsonSchema)]
+#[derive(Debug, Serialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub struct LocalShardInfo {
     /// Local shard id
@@ -220,7 +236,7 @@ pub struct LocalShardInfo {
     pub state: ReplicaState,
 }
 
-#[derive(Debug, Deserialize, Serialize, JsonSchema)]
+#[derive(Debug, Serialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub struct RemoteShardInfo {
     /// Remote shard id
@@ -236,21 +252,30 @@ pub struct RemoteShardInfo {
 
 /// `Acknowledged` - Request is saved to WAL and will be process in a queue.
 /// `Completed` - Request is completed, changes are actual.
-#[derive(Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
+#[derive(Debug, Serialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum UpdateStatus {
     Acknowledged,
     Completed,
+    /// Internal: update is rejected due to an outdated clock
+    #[schemars(skip)]
+    ClockRejected,
 }
 
-#[derive(Debug, Deserialize, Serialize, JsonSchema)]
+#[derive(Debug, Serialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub struct UpdateResult {
     /// Sequential number of the operation
     #[serde(skip_serializing_if = "Option::is_none")]
     pub operation_id: Option<SeqNumberType>,
+
     /// Update status
     pub status: UpdateStatus,
+
+    /// Updated value for the external clock tick
+    /// Provided if incoming update request also specify clock tick
+    #[serde(skip)]
+    pub clock_tag: Option<ClockTag>,
 }
 
 #[derive(Debug, Deserialize, Serialize, JsonSchema, Validate, Clone)]
@@ -264,23 +289,50 @@ pub struct ScrollRequest {
     pub shard_key: Option<ShardKeySelector>,
 }
 
+#[derive(Debug, Deserialize, Serialize, JsonSchema, Clone)]
+#[serde(untagged)]
+pub enum OrderByInterface {
+    Key(JsonPath),
+    Struct(OrderBy),
+}
+
+impl From<OrderByInterface> for OrderBy {
+    fn from(order_by: OrderByInterface) -> Self {
+        match order_by {
+            OrderByInterface::Key(key) => OrderBy {
+                key,
+                direction: None,
+                start_from: None,
+            },
+            OrderByInterface::Struct(order_by) => order_by,
+        }
+    }
+}
+
 /// Scroll request - paginate over all points which matches given condition
 #[derive(Debug, Deserialize, Serialize, JsonSchema, Validate, Clone)]
 #[serde(rename_all = "snake_case")]
 pub struct ScrollRequestInternal {
     /// Start ID to read points from.
     pub offset: Option<PointIdType>,
+
     /// Page size. Default: 10
     #[validate(range(min = 1))]
     pub limit: Option<usize>,
+
     /// Look only for points which satisfies this conditions. If not provided - all points.
     #[validate]
     pub filter: Option<Filter>,
+
     /// Select which payload to return with the response. Default: All
     pub with_payload: Option<WithPayloadInterface>,
+
     /// Whether to return the point vector with the result?
     #[serde(default, alias = "with_vectors")]
     pub with_vector: WithVector,
+
+    /// Order the records by a payload field.
+    pub order_by: Option<OrderByInterface>,
 }
 
 impl Default for ScrollRequestInternal {
@@ -291,12 +343,13 @@ impl Default for ScrollRequestInternal {
             filter: None,
             with_payload: Some(WithPayloadInterface::Bool(true)),
             with_vector: WithVector::Bool(false),
+            order_by: None,
         }
     }
 }
 
 /// Result of the points read request
-#[derive(Debug, Deserialize, Serialize, JsonSchema)]
+#[derive(Debug, Serialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub struct ScrollResult {
     /// List of retrieved points
@@ -377,8 +430,8 @@ impl QueryEnum {
     }
 }
 
-impl From<Vec<VectorElementType>> for QueryEnum {
-    fn from(vector: Vec<VectorElementType>) -> Self {
+impl From<DenseVector> for QueryEnum {
+    fn from(vector: DenseVector) -> Self {
         QueryEnum::Nearest(NamedVectorStruct::Default(vector))
     }
 }
@@ -796,7 +849,7 @@ pub struct DiscoverRequestBatch {
     pub searches: Vec<DiscoverRequest>,
 }
 
-#[derive(Debug, Serialize, Deserialize, JsonSchema, Clone)]
+#[derive(Debug, Serialize, JsonSchema, Clone)]
 pub struct PointGroup {
     /// Scored points that have the same value of the group_by key
     pub hits: Vec<ScoredPoint>,
@@ -807,7 +860,7 @@ pub struct PointGroup {
     pub lookup: Option<Record>,
 }
 
-#[derive(Debug, Deserialize, Serialize, JsonSchema)]
+#[derive(Debug, Serialize, JsonSchema)]
 pub struct GroupsResult {
     pub groups: Vec<PointGroup>,
 }
@@ -842,7 +895,7 @@ pub const fn default_exact_count() -> bool {
     true
 }
 
-#[derive(Debug, Deserialize, Serialize, JsonSchema)]
+#[derive(Debug, Serialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub struct CountResult {
     /// Number of points which satisfy the conditions
@@ -1020,6 +1073,7 @@ impl From<OperationError> for CollectionError {
             OperationError::WrongSparse => Self::BadInput {
                 description: "Conversion between sparse and regular vectors failed".to_string(),
             },
+            OperationError::WrongPayloadKey { description } => Self::BadInput { description },
         }
     }
 }
@@ -1661,14 +1715,14 @@ impl Validate for SparseVectorsConfig {
     }
 }
 
-#[derive(Debug, Deserialize, Serialize, JsonSchema)]
+#[derive(Debug, Serialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub struct AliasDescription {
     pub alias_name: String,
     pub collection_name: String,
 }
 
-#[derive(Debug, Deserialize, Serialize, JsonSchema)]
+#[derive(Debug, Serialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub struct CollectionsAliasesResponse {
     pub aliases: Vec<AliasDescription>,
@@ -1690,8 +1744,9 @@ pub struct BaseGroupRequest {
     /// Payload field to group by, must be a string or number field.
     /// If the field contains more than 1 value, all values will be used for grouping.
     /// One point can be in multiple groups.
-    #[validate(length(min = 1))]
-    pub group_by: String,
+    #[schemars(length(min = 1))]
+    #[validate(custom = "JsonPath::validate_not_empty")]
+    pub group_by: JsonPath,
 
     /// Maximum amount of points to return per group
     #[validate(range(min = 1))]
@@ -1729,4 +1784,10 @@ impl From<QueryEnum> for QueryVector {
             QueryEnum::Context(named) => QueryVector::Context(named.query),
         }
     }
+}
+
+/// All the unresolved issues in a Qdrant instance
+#[derive(Serialize, JsonSchema, Debug)]
+pub struct IssuesReport {
+    pub issues: Vec<IssueRecord>,
 }

@@ -18,7 +18,7 @@ use crate::common::operation_error::{check_process_stopped, OperationError, Oper
 use crate::common::rocksdb_wrapper::DatabaseColumnWrapper;
 use crate::common::Flusher;
 use crate::data_types::named_vectors::CowVector;
-use crate::data_types::vectors::{VectorElementType, VectorRef};
+use crate::data_types::vectors::{DenseVector, VectorElementType, VectorRef};
 use crate::types::Distance;
 use crate::vector_storage::bitvec::bitvec_set_deleted;
 
@@ -38,7 +38,7 @@ pub struct SimpleDenseVectorStorage {
 #[derive(Debug, Deserialize, Serialize, Clone)]
 struct StoredRecord {
     pub deleted: bool,
-    pub vector: Vec<VectorElementType>,
+    pub vector: DenseVector,
 }
 
 pub fn open_simple_vector_storage(
@@ -46,6 +46,7 @@ pub fn open_simple_vector_storage(
     database_column_name: &str,
     dim: usize,
     distance: Distance,
+    stopped: &AtomicBool,
 ) -> OperationResult<Arc<AtomicRefCell<VectorStorageEnum>>> {
     let mut vectors = ChunkedVectors::new(dim);
     let (mut deleted, mut deleted_count) = (BitVec::new(), 0);
@@ -64,6 +65,8 @@ pub fn open_simple_vector_storage(
             deleted_count += 1;
         }
         vectors.insert(point_id, &stored_record.vector)?;
+
+        check_process_stopped(stopped)?;
     }
 
     debug!("Segment vectors: {}", vectors.len());
@@ -167,7 +170,7 @@ impl VectorStorage for SimpleDenseVectorStorage {
     fn update_from(
         &mut self,
         other: &VectorStorageEnum,
-        other_ids: &mut dyn Iterator<Item = PointOffsetType>,
+        other_ids: &mut impl Iterator<Item = PointOffsetType>,
         stopped: &AtomicBool,
     ) -> OperationResult<Range<PointOffsetType>> {
         let start_index = self.vectors.len() as PointOffsetType;

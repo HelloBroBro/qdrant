@@ -1,9 +1,10 @@
 import json
 import os
+import re
 import shutil
 from subprocess import Popen
 import time
-from typing import Tuple, Callable, Dict, List, Optional
+from typing import Tuple, Callable, Dict, List
 import requests
 import socket
 from contextlib import closing
@@ -90,7 +91,7 @@ def start_peer(peer_dir: Path, log_file: str, bootstrap_uri: str, port=None, ext
     this_peer_consensus_uri = get_uri(p2p_port)
     processes.append(
         Popen([get_qdrant_exec(), "--bootstrap", bootstrap_uri, "--uri", this_peer_consensus_uri], env=env,
-              cwd=peer_dir, stderr=log_file))
+              cwd=peer_dir, stdout=log_file))
     return get_uri(http_port)
 
 
@@ -112,7 +113,7 @@ def start_first_peer(peer_dir: Path, log_file: str, port=None, extra_env=None) -
     print(f"\nStarting first peer with uri {bootstrap_uri},"
           f" http: http://localhost:{http_port}/cluster, p2p: {p2p_port}")
     processes.append(
-        Popen([get_qdrant_exec(), "--uri", bootstrap_uri], env=env, cwd=peer_dir, stderr=log_file))
+        Popen([get_qdrant_exec(), "--uri", bootstrap_uri], env=env, cwd=peer_dir, stdout=log_file))
     return get_uri(http_port), bootstrap_uri
 
 
@@ -324,6 +325,27 @@ def check_collection_shard_transfers_count(peer_api_uri: str, collection_name: s
     return local_shard_count == expected_shard_transfers_count
 
 
+def check_collection_shard_transfer_progress(peer_api_uri: str, collection_name: str,
+                                            expected_transfer_progress: int,
+                                            expected_transfer_total: int) -> bool:
+    collection_cluster_info = get_collection_cluster_info(peer_api_uri, collection_name)
+
+    # Check progress on each transfer
+    for transfer in collection_cluster_info["shard_transfers"]:
+        if "comment" not in transfer:
+            continue
+        comment = transfer["comment"]
+
+        # Compare progress or total
+        current, total = re.search(r"Transferring records \((\d+)/(\d+)\), started", comment).groups()
+        if current is not None and expected_transfer_progress is not None and int(current) >= expected_transfer_progress:
+            return True
+        if total is not None and expected_transfer_total is not None and int(total) >= expected_transfer_total:
+            return True
+
+    return False
+
+
 def check_all_replicas_active(peer_api_uri: str, collection_name: str) -> bool:
     collection_cluster_info = get_collection_cluster_info(peer_api_uri, collection_name)
     for shard in collection_cluster_info["local_shards"]:
@@ -412,6 +434,16 @@ def wait_for_collection_shard_transfers_count(peer_api_uri: str, collection_name
         raise e
 
 
+def wait_for_collection_shard_transfer_progress(peer_api_uri: str, collection_name: str,
+                                                 expected_transfer_progress: int = None,
+                                                 expected_transfer_total: int = None):
+    try:
+        wait_for(check_collection_shard_transfer_progress, peer_api_uri, collection_name, expected_transfer_progress, expected_transfer_total)
+    except Exception as e:
+        print_collection_cluster_info(peer_api_uri, collection_name)
+        raise e
+
+
 def wait_for_collection_local_shards_count(peer_api_uri: str, collection_name: str, expected_local_shard_count: int):
     try:
         wait_for(check_collection_local_shards_count, peer_api_uri, collection_name, expected_local_shard_count)
@@ -431,17 +463,17 @@ def wait_for(condition: Callable[..., bool], *args, wait_for_interval=RETRY_INTE
             time.sleep(wait_for_interval)
 
 
-def peer_is_online(peer_api_uri: str) -> bool:
+def peer_is_online(peer_api_uri: str, path: str = "/readyz") -> bool:
     try:
-        r = requests.get(f"{peer_api_uri}")
+        r = requests.get(f"{peer_api_uri}{path}")
         return r.status_code == 200
     except:
         return False
 
 
-def wait_for_peer_online(peer_api_uri: str):
+def wait_for_peer_online(peer_api_uri: str, path="/readyz"):
     try:
-        wait_for(peer_is_online, peer_api_uri)
+        wait_for(peer_is_online, peer_api_uri, path=path)
     except Exception as e:
         print_clusters_info([peer_api_uri])
         raise e

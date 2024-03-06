@@ -2,6 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use common::cpu::CpuBudget;
 use itertools::Itertools;
 // TODO rename ReplicaShard to ReplicaSetShard
 use segment::types::ShardKey;
@@ -10,14 +11,12 @@ use tokio::runtime::Handle;
 use tokio::sync::RwLock;
 
 use super::replica_set::AbortShardTransfer;
-use crate::common::file_utils::move_file;
+use super::transfer::transfer_tasks_pool::TransferTasksPool;
 use crate::config::{CollectionConfig, ShardingMethod};
 use crate::hash_ring::HashRing;
 use crate::operations::shard_selector_internal::ShardSelectorInternal;
 use crate::operations::shared_storage_config::SharedStorageConfig;
-use crate::operations::snapshot_ops::{
-    get_snapshot_description, list_snapshots_in_directory, SnapshotDescription,
-};
+use crate::operations::snapshot_ops::SnapshotDescription;
 use crate::operations::types::{CollectionError, CollectionResult, ShardTransferInfo};
 use crate::operations::{OperationToShard, SplitByShard};
 use crate::save_on_disk::SaveOnDisk;
@@ -295,7 +294,10 @@ impl ShardHolder {
         (incoming, outgoing)
     }
 
-    pub fn get_shard_transfer_info(&self) -> Vec<ShardTransferInfo> {
+    pub fn get_shard_transfer_info(
+        &self,
+        tasks_pool: &TransferTasksPool,
+    ) -> Vec<ShardTransferInfo> {
         let mut shard_transfers = vec![];
         for shard_transfer in self.shard_transfers.read().iter() {
             let shard_id = shard_transfer.shard_id;
@@ -303,12 +305,14 @@ impl ShardHolder {
             let from = shard_transfer.from;
             let sync = shard_transfer.sync;
             let method = shard_transfer.method;
+            let status = tasks_pool.get_task_status(&shard_transfer.key());
             shard_transfers.push(ShardTransferInfo {
                 shard_id,
                 from,
                 to,
                 sync,
                 method,
+                comment: status.map(|p| p.comment),
             })
         }
         shard_transfers.sort_by_key(|k| k.shard_id);
@@ -423,6 +427,7 @@ impl ShardHolder {
         this_peer_id: PeerId,
         update_runtime: Handle,
         search_runtime: Handle,
+        optimizer_cpu_budget: CpuBudget,
     ) {
         let shard_number = collection_config.read().await.params.shard_number.get();
 
@@ -466,6 +471,7 @@ impl ShardHolder {
                     this_peer_id,
                     update_runtime.clone(),
                     search_runtime.clone(),
+                    optimizer_cpu_budget.clone(),
                 )
                 .await;
 
@@ -480,6 +486,7 @@ impl ShardHolder {
                             collection_config.clone(),
                             shared_storage_config.clone(),
                             update_runtime.clone(),
+                            optimizer_cpu_budget.clone(),
                         )
                         .await
                         .unwrap();
@@ -504,6 +511,7 @@ impl ShardHolder {
                             collection_config.clone(),
                             shared_storage_config.clone(),
                             update_runtime.clone(),
+                            optimizer_cpu_budget.clone(),
                         )
                         .await
                         .unwrap();
@@ -669,7 +677,11 @@ impl ShardHolder {
             return Ok(Vec::new());
         }
 
-        list_snapshots_in_directory(&snapshots_path).await
+        let shard = self
+            .get_shard(&shard_id)
+            .ok_or_else(|| shard_not_found_error(shard_id))?;
+        let snapshot_manager = shard.get_snapshots_storage_manager();
+        snapshot_manager.list_snapshots(&snapshots_path).await
     }
 
     /// # Cancel safety
@@ -762,27 +774,14 @@ impl ShardHolder {
         let snapshot_path =
             self.shard_snapshot_path_unchecked(snapshots_path, shard_id, snapshot_file_name)?;
 
-        if let Some(snapshot_dir) = snapshot_path.parent() {
-            if !snapshot_dir.exists() {
-                std::fs::create_dir_all(snapshot_dir)?;
-            }
+        let snapshot_manager = shard.get_snapshots_storage_manager();
+        let snapshot_description = snapshot_manager
+            .store_file(temp_file.path(), &snapshot_path)
+            .await;
+        if snapshot_description.is_ok() {
+            let _ = temp_file.keep();
         }
-
-        // Remove partially moved `snapshot_path`, if `move_file` fails
-        let snapshot_file = tempfile::TempPath::from_path(&snapshot_path);
-
-        // `tempfile::NamedTempFile::persist` does not work if destination file is on another
-        // file-system, so we have to move the file explicitly
-        move_file(temp_file.path(), &snapshot_path).await?;
-
-        // We successfully moved `snapshot_path`, so we `keep` it
-        snapshot_file.keep()?;
-
-        // We successfully moved `temp_file`, but `tempfile` will still try to delete the file on drop,
-        // so we `keep` it and ignore the error
-        let _ = temp_file.keep();
-
-        get_snapshot_description(&snapshot_path).await
+        snapshot_description
     }
 
     /// # Cancel safety

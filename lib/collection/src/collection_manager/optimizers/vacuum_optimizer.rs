@@ -4,9 +4,7 @@ use std::sync::Arc;
 
 use ordered_float::OrderedFloat;
 use parking_lot::Mutex;
-use segment::common::operation_time_statistics::{
-    OperationDurationStatistics, OperationDurationsAggregator,
-};
+use segment::common::operation_time_statistics::OperationDurationsAggregator;
 use segment::entry::entry_point::SegmentEntry;
 use segment::index::VectorIndex;
 use segment::types::{HnswConfig, QuantizationConfig, SegmentType};
@@ -204,12 +202,8 @@ impl SegmentOptimizer for VacuumOptimizer {
         }
     }
 
-    fn get_telemetry_data(&self) -> OperationDurationStatistics {
-        self.get_telemetry_counter().lock().get_statistics()
-    }
-
-    fn get_telemetry_counter(&self) -> Arc<Mutex<OperationDurationsAggregator>> {
-        self.telemetry_durations_aggregator.clone()
+    fn get_telemetry_counter(&self) -> &Mutex<OperationDurationsAggregator> {
+        &self.telemetry_durations_aggregator
     }
 }
 
@@ -220,9 +214,11 @@ mod tests {
     use std::sync::atomic::AtomicBool;
     use std::sync::Arc;
 
+    use common::cpu::CpuPermit;
     use itertools::Itertools;
     use parking_lot::RwLock;
     use segment::entry::entry_point::SegmentEntry;
+    use segment::index::hnsw_index::num_rayon_threads;
     use segment::types::{Distance, PayloadContainer, PayloadSchemaType};
     use serde_json::{json, Value};
     use tempfile::Builder;
@@ -279,7 +275,7 @@ mod tests {
             segment
                 .get()
                 .write()
-                .set_payload(102, point_id, &json!({ "color": "red" }).into())
+                .set_payload(102, point_id, &json!({ "color": "red" }).into(), &None)
                 .unwrap();
         }
 
@@ -287,7 +283,7 @@ mod tests {
             segment
                 .get()
                 .write()
-                .set_payload(102, point_id, &json!({"size": 0.42}).into())
+                .set_payload(102, point_id, &json!({"size": 0.42}).into(), &None)
                 .unwrap();
         }
 
@@ -323,10 +319,14 @@ mod tests {
         // Check that only one segment is selected for optimization
         assert_eq!(suggested_to_optimize.len(), 1);
 
+        let permit_cpu_count = num_rayon_threads(0);
+        let permit = CpuPermit::dummy(permit_cpu_count as u32);
+
         vacuum_optimizer
             .optimize(
                 locked_holder.clone(),
                 suggested_to_optimize,
+                permit,
                 &AtomicBool::new(false),
             )
             .unwrap();
@@ -354,7 +354,11 @@ mod tests {
         for &point_id in &segment_points_to_assign1 {
             assert!(segment_guard.has_point(point_id));
             let payload = segment_guard.payload(point_id).unwrap();
-            let payload_color = &(*payload.get_value("color").into_iter().next().unwrap()).clone();
+            let payload_color = payload
+                .get_value(&"color".parse().unwrap())
+                .into_iter()
+                .next()
+                .unwrap();
 
             match payload_color {
                 Value::String(x) => assert_eq!(x, "red"),
@@ -430,7 +434,11 @@ mod tests {
         );
 
         segment
-            .create_field_index(101, "keyword", Some(&PayloadSchemaType::Keyword.into()))
+            .create_field_index(
+                101,
+                &"keyword".parse().unwrap(),
+                Some(&PayloadSchemaType::Keyword.into()),
+            )
             .unwrap();
 
         let mut segment_id = holder.add(segment);
@@ -444,6 +452,9 @@ mod tests {
             on_disk: None,
             payload_m: None,
         };
+
+        let permit_cpu_count = num_rayon_threads(hnsw_config.max_indexing_threads);
+        let permit = CpuPermit::dummy(permit_cpu_count as u32);
 
         // Optimizers used in test
         let index_optimizer = IndexingOptimizer::new(
@@ -467,7 +478,12 @@ mod tests {
 
         // Use indexing optimizer to build index for vacuum index test
         let changed = index_optimizer
-            .optimize(locked_holder.clone(), vec![segment_id], &false.into())
+            .optimize(
+                locked_holder.clone(),
+                vec![segment_id],
+                permit,
+                &false.into(),
+            )
             .unwrap();
         assert!(changed, "optimizer should have rebuilt this segment");
         assert!(
@@ -572,11 +588,17 @@ mod tests {
             });
 
         // Run vacuum index optimizer, make sure it optimizes properly
+        let permit = CpuPermit::dummy(permit_cpu_count as u32);
         let suggested_to_optimize =
             vacuum_optimizer.check_condition(locked_holder.clone(), &Default::default());
         assert_eq!(suggested_to_optimize.len(), 1);
         let changed = vacuum_optimizer
-            .optimize(locked_holder.clone(), suggested_to_optimize, &false.into())
+            .optimize(
+                locked_holder.clone(),
+                suggested_to_optimize,
+                permit,
+                &false.into(),
+            )
             .unwrap();
         assert!(changed, "optimizer should have rebuilt this segment");
 

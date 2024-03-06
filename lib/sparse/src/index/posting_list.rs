@@ -5,7 +5,7 @@ use ordered_float::OrderedFloat;
 
 use crate::common::types::DimWeight;
 
-#[derive(Debug, Copy, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct PostingElement {
     /// Record ID
     pub record_id: PointOffsetType,
@@ -137,10 +137,12 @@ impl PostingBuilder {
         }
     }
 
+    /// Add a new record to the posting list.
     pub fn add(&mut self, record_id: PointOffsetType, weight: DimWeight) {
         self.elements.push(PostingElement::new(record_id, weight));
     }
 
+    /// Consume the builder and return the posting list.
     pub fn build(mut self) -> PostingList {
         // Sort by id
         self.elements.sort_unstable_by_key(|e| e.record_id);
@@ -157,7 +159,7 @@ impl PostingBuilder {
             }
         }
 
-        // Calculate max_next_weight
+        // Calculate the `max_next_weight` for all elements starting from the end
         let mut max_next_weight = f32::NEG_INFINITY;
         for element in self.elements.iter_mut().rev() {
             element.max_next_weight = max_next_weight;
@@ -176,26 +178,29 @@ pub struct PostingListIterator<'a> {
     pub current_index: usize,
 }
 
-impl<'a> Iterator for PostingListIterator<'a> {
-    type Item = &'a PostingElement;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        if self.current_index < self.elements.len() {
-            let element = &self.elements[self.current_index];
-            self.current_index += 1;
-            Some(element)
-        } else {
-            None
-        }
-    }
-}
-
 impl<'a> PostingListIterator<'a> {
     pub fn new(elements: &'a [PostingElement]) -> PostingListIterator<'a> {
         PostingListIterator {
             elements,
             current_index: 0,
         }
+    }
+
+    /// Slice of the remaining elements.
+    pub fn remaining_elements(&self) -> &'a [PostingElement] {
+        &self.elements[self.current_index..]
+    }
+
+    /// Advances the iterator to the next element.
+    pub fn advance(&mut self) {
+        if self.current_index < self.elements.len() {
+            self.current_index += 1;
+        }
+    }
+
+    /// Advances the iterator by `count` elements.
+    pub fn advance_by(&mut self, count: usize) {
+        self.current_index = (self.current_index + count).min(self.elements.len());
     }
 
     /// Returns the next element without advancing the iterator.
@@ -265,10 +270,9 @@ mod tests {
         let mut iter = PostingListIterator::new(&posting_list.elements);
 
         assert_eq!(iter.peek().unwrap().record_id, 1);
-
-        assert_eq!(iter.next().unwrap().record_id, 1);
+        iter.advance();
         assert_eq!(iter.peek().unwrap().record_id, 2);
-        assert_eq!(iter.next().unwrap().record_id, 2);
+        iter.advance();
         assert_eq!(iter.peek().unwrap().record_id, 3);
 
         assert_eq!(iter.skip_to(7).unwrap().record_id, 7);

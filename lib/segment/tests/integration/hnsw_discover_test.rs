@@ -1,6 +1,8 @@
 use std::collections::HashMap;
 use std::sync::atomic::AtomicBool;
+use std::sync::Arc;
 
+use common::cpu::CpuPermit;
 use itertools::Itertools;
 use rand::prelude::StdRng;
 use rand::{Rng, SeedableRng};
@@ -9,6 +11,7 @@ use segment::entry::entry_point::SegmentEntry;
 use segment::fixtures::payload_fixtures::random_vector;
 use segment::index::hnsw_index::graph_links::GraphLinksRam;
 use segment::index::hnsw_index::hnsw::HNSWIndex;
+use segment::index::hnsw_index::num_rayon_threads;
 use segment::index::{PayloadIndex, VectorIndex};
 use segment::segment_constructor::build_segment;
 use segment::types::{
@@ -19,6 +22,8 @@ use segment::vector_storage::query::context_query::ContextPair;
 use segment::vector_storage::query::discovery_query::DiscoveryQuery;
 use serde_json::json;
 use tempfile::Builder;
+
+use crate::utils::path;
 
 const MAX_EXAMPLE_PAIRS: usize = 3;
 
@@ -100,6 +105,9 @@ fn hnsw_discover_precision() {
         payload_m: None,
     };
 
+    let permit_cpu_count = num_rayon_threads(hnsw_config.max_indexing_threads);
+    let permit = Arc::new(CpuPermit::dummy(permit_cpu_count as u32));
+
     let vector_storage = &segment.vector_data[DEFAULT_VECTOR_NAME].vector_storage;
     let quantized_vectors = &segment.vector_data[DEFAULT_VECTOR_NAME].quantized_vectors;
     let mut hnsw_index = HNSWIndex::<GraphLinksRam>::open(
@@ -112,7 +120,7 @@ fn hnsw_discover_precision() {
     )
     .unwrap();
 
-    hnsw_index.build_index(&stopped).unwrap();
+    hnsw_index.build_index(permit, &stopped).unwrap();
 
     let top = 3;
     let mut discovery_hits = 0;
@@ -214,6 +222,9 @@ fn filtered_hnsw_discover_precision() {
         payload_m: None,
     };
 
+    let permit_cpu_count = num_rayon_threads(hnsw_config.max_indexing_threads);
+    let permit = Arc::new(CpuPermit::dummy(permit_cpu_count as u32));
+
     let vector_storage = &segment.vector_data[DEFAULT_VECTOR_NAME].vector_storage;
     let quantized_vectors = &segment.vector_data[DEFAULT_VECTOR_NAME].quantized_vectors;
     let mut hnsw_index = HNSWIndex::<GraphLinksRam>::open(
@@ -228,17 +239,17 @@ fn filtered_hnsw_discover_precision() {
 
     payload_index_ptr
         .borrow_mut()
-        .set_indexed(keyword_key, PayloadSchemaType::Keyword.into())
+        .set_indexed(&path(keyword_key), PayloadSchemaType::Keyword.into())
         .unwrap();
 
-    hnsw_index.build_index(&stopped).unwrap();
+    hnsw_index.build_index(permit, &stopped).unwrap();
 
     let top = 3;
     let mut discovery_hits = 0;
     let attempts = 100;
     for _i in 0..attempts {
         let filter = Filter::new_must(Condition::Field(FieldCondition::new_match(
-            keyword_key.to_owned(),
+            path(keyword_key),
             get_random_keyword_of(num_payload_values, &mut rnd).into(),
         )));
 

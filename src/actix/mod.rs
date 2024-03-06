@@ -124,7 +124,16 @@ pub fn init(
                     ApiKey::new(auth_keys.clone(), api_key_whitelist.clone()),
                 ))
                 .wrap(Condition::new(settings.service.enable_cors, cors))
-                .wrap(Logger::default().exclude("/")) // Avoid logging healthcheck requests
+                .wrap(
+                    // Set up logger, but avoid logging hot status endpoints
+                    Logger::default()
+                        .exclude("/")
+                        .exclude("/metrics")
+                        .exclude("/telemetry")
+                        .exclude("/healthz")
+                        .exclude("/readyz")
+                        .exclude("/livez"),
+                )
                 .wrap(actix_telemetry::ActixTelemetryTransform::new(
                     actix_telemetry_collector.clone(),
                 ))
@@ -148,10 +157,12 @@ pub fn init(
                 .configure(config_recommend_api)
                 .configure(config_discovery_api)
                 .configure(config_shards_api)
-                .service(get_point)
-                .service(get_points)
+                // Ordering of services is important for correct path pattern matching
+                // See: <https://github.com/qdrant/qdrant/issues/3543>
                 .service(scroll_points)
-                .service(count_points);
+                .service(count_points)
+                .service(get_point)
+                .service(get_points);
 
             if web_ui_available {
                 app = app.service(

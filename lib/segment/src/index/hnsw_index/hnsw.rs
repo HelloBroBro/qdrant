@@ -3,9 +3,13 @@ use std::ops::Deref;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
+use std::thread;
 
 use atomic_refcell::AtomicRefCell;
-use common::types::{PointOffsetType, ScoredPointOffset};
+#[cfg(target_os = "linux")]
+use common::cpu::linux_low_thread_priority;
+use common::cpu::CpuPermit;
+use common::types::{PointOffsetType, ScoredPointOffset, TelemetryDetail};
 use log::debug;
 use memory::mmap_ops;
 use parking_lot::Mutex;
@@ -25,7 +29,6 @@ use crate::index::hnsw_index::build_condition_checker::BuildConditionChecker;
 use crate::index::hnsw_index::config::HnswGraphConfig;
 use crate::index::hnsw_index::graph_layers::GraphLayers;
 use crate::index::hnsw_index::graph_layers_builder::GraphLayersBuilder;
-use crate::index::hnsw_index::max_rayon_threads;
 use crate::index::hnsw_index::point_scorer::FilteredScorer;
 use crate::index::query_estimator::adjust_to_available_vectors;
 use crate::index::sample_estimation::sample_check_cardinality;
@@ -633,7 +636,7 @@ impl<TGraphLinks: GraphLinks> VectorIndex for HNSWIndex<TGraphLinks> {
         }
     }
 
-    fn build_index(&mut self, stopped: &AtomicBool) -> OperationResult<()> {
+    fn build_index(&mut self, permit: Arc<CpuPermit>, stopped: &AtomicBool) -> OperationResult<()> {
         // Build main index graph
         let id_tracker = self.id_tracker.borrow();
         let vector_storage = self.vector_storage.borrow();
@@ -643,7 +646,10 @@ impl<TGraphLinks: GraphLinks> VectorIndex for HNSWIndex<TGraphLinks> {
         let total_vector_count = vector_storage.total_vector_count();
         let deleted_bitslice = vector_storage.deleted_vector_bitslice();
 
-        debug!("building HNSW for {} vectors", total_vector_count);
+        debug!(
+            "building HNSW for {total_vector_count} vectors with {} CPUs",
+            permit.num_cpus,
+        );
         let indexing_threshold = self.config.full_scan_threshold;
         let mut graph_layers_builder = GraphLayersBuilder::new(
             total_vector_count,
@@ -660,7 +666,28 @@ impl<TGraphLinks: GraphLinks> VectorIndex for HNSWIndex<TGraphLinks> {
 
         let pool = rayon::ThreadPoolBuilder::new()
             .thread_name(|idx| format!("hnsw-build-{idx}"))
-            .num_threads(max_rayon_threads(self.config.max_indexing_threads))
+            .num_threads(permit.num_cpus as usize)
+            .spawn_handler(|thread| {
+                let mut b = thread::Builder::new();
+                if let Some(name) = thread.name() {
+                    b = b.name(name.to_owned());
+                }
+                if let Some(stack_size) = thread.stack_size() {
+                    b = b.stack_size(stack_size);
+                }
+                b.spawn(|| {
+                    // On Linux, use lower thread priority so we interfere less with serving traffic
+                    #[cfg(target_os = "linux")]
+                    if let Err(err) = linux_low_thread_priority() {
+                        log::debug!(
+                            "Failed to set low thread priority for HNSW building, ignoring: {err}"
+                        );
+                    }
+
+                    thread.run()
+                })?;
+                Ok(())
+            })
             .build()?;
 
         for vector_id in id_tracker.iter_ids_excluding(deleted_bitslice) {
@@ -798,18 +825,18 @@ impl<TGraphLinks: GraphLinks> VectorIndex for HNSWIndex<TGraphLinks> {
         self.save()
     }
 
-    fn get_telemetry_data(&self) -> VectorIndexSearchesTelemetry {
+    fn get_telemetry_data(&self, detail: TelemetryDetail) -> VectorIndexSearchesTelemetry {
         let tm = &self.searches_telemetry;
         VectorIndexSearchesTelemetry {
             index_name: None,
-            unfiltered_plain: tm.unfiltered_plain.lock().get_statistics(),
+            unfiltered_plain: tm.unfiltered_plain.lock().get_statistics(detail),
             filtered_plain: Default::default(),
-            unfiltered_hnsw: tm.unfiltered_hnsw.lock().get_statistics(),
-            filtered_small_cardinality: tm.small_cardinality.lock().get_statistics(),
-            filtered_large_cardinality: tm.large_cardinality.lock().get_statistics(),
-            filtered_exact: tm.exact_filtered.lock().get_statistics(),
+            unfiltered_hnsw: tm.unfiltered_hnsw.lock().get_statistics(detail),
+            filtered_small_cardinality: tm.small_cardinality.lock().get_statistics(detail),
+            filtered_large_cardinality: tm.large_cardinality.lock().get_statistics(detail),
+            filtered_exact: tm.exact_filtered.lock().get_statistics(detail),
             filtered_sparse: Default::default(),
-            unfiltered_exact: tm.exact_unfiltered.lock().get_statistics(),
+            unfiltered_exact: tm.exact_unfiltered.lock().get_statistics(detail),
             unfiltered_sparse: Default::default(),
         }
     }

@@ -12,6 +12,8 @@ use api::grpc::qdrant::{AllPeers, PeerId as GrpcPeerId, RaftMessage as GrpcRaftM
 use api::grpc::transport_channel_pool::TransportChannelPool;
 use collection::shards::channel_service::ChannelService;
 use collection::shards::shard::PeerId;
+#[cfg(target_os = "linux")]
+use common::cpu::linux_high_thread_priority;
 use common::defaults;
 use prost::Message as _;
 use raft::eraftpb::Message as RaftMessage;
@@ -93,6 +95,15 @@ impl Consensus {
         thread::Builder::new()
             .name("consensus".to_string())
             .spawn(move || {
+                // On Linux, try to use high thread priority because consensus is important
+                // Likely fails as we cannot set a higher priority by default due to permissions
+                #[cfg(target_os = "linux")]
+                if let Err(err) = linux_high_thread_priority() {
+                    log::debug!(
+                        "Failed to set high thread priority for consensus, ignoring: {err}"
+                    );
+                }
+
                 if let Err(err) = consensus.start() {
                     log::error!("Consensus stopped with error: {err}");
                     state_ref_clone.on_consensus_thread_err(err);
@@ -106,6 +117,15 @@ impl Consensus {
         thread::Builder::new()
             .name("forward-proposals".to_string())
             .spawn(move || {
+                // On Linux, try to use high thread priority because consensus is important
+                // Likely fails as we cannot set a higher priority by default due to permissions
+                #[cfg(target_os = "linux")]
+                if let Err(err) = linux_high_thread_priority() {
+                    log::debug!(
+                        "Failed to set high thread priority for consensus, ignoring: {err}"
+                    );
+                }
+
                 while let Ok(entry) = propose_receiver.recv() {
                     if message_sender_moved
                         .blocking_send(Message::FromClient(entry))
@@ -296,7 +316,7 @@ impl Consensus {
             tls_config,
         )
         .await
-        .map_err(|err| anyhow!("Failed to create timeout channel: {}", err))?;
+        .map_err(|err| anyhow!("Failed to create timeout channel: {err}"))?;
         let mut client = RaftClient::new(channel);
         let all_peers = client
             .add_peer_to_known(tonic::Request::new(
@@ -307,7 +327,7 @@ impl Consensus {
                 },
             ))
             .await
-            .map_err(|err| anyhow!("Failed to add peer to known: {}", err))?
+            .map_err(|err| anyhow!("Failed to add peer to known: {err}"))?
             .into_inner();
         Ok(all_peers)
     }
@@ -1120,6 +1140,7 @@ mod tests {
 
     use collection::operations::types::VectorParams;
     use collection::shards::channel_service::ChannelService;
+    use common::cpu::CpuBudget;
     use segment::types::Distance;
     use slog::Drain;
     use storage::content_manager::collection_meta_ops::{
@@ -1161,6 +1182,7 @@ mod tests {
             search_runtime,
             update_runtime,
             general_runtime,
+            CpuBudget::default(),
             ChannelService::new(settings.service.http_port),
             persistent_state.this_peer_id(),
             Some(operation_sender.clone()),

@@ -4,9 +4,7 @@ use std::sync::Arc;
 
 use itertools::Itertools;
 use parking_lot::Mutex;
-use segment::common::operation_time_statistics::{
-    OperationDurationStatistics, OperationDurationsAggregator,
-};
+use segment::common::operation_time_statistics::OperationDurationsAggregator;
 use segment::types::{HnswConfig, QuantizationConfig, SegmentType, VECTOR_ELEMENT_SIZE};
 
 use crate::collection_manager::holders::segment_holder::{
@@ -150,12 +148,8 @@ impl SegmentOptimizer for MergeOptimizer {
         candidates
     }
 
-    fn get_telemetry_data(&self) -> OperationDurationStatistics {
-        self.get_telemetry_counter().lock().get_statistics()
-    }
-
-    fn get_telemetry_counter(&self) -> Arc<Mutex<OperationDurationsAggregator>> {
-        self.telemetry_durations_aggregator.clone()
+    fn get_telemetry_counter(&self) -> &Mutex<OperationDurationsAggregator> {
+        &self.telemetry_durations_aggregator
     }
 }
 
@@ -164,7 +158,9 @@ mod tests {
     use std::sync::atomic::AtomicBool;
     use std::sync::Arc;
 
+    use common::cpu::CpuPermit;
     use parking_lot::RwLock;
+    use segment::index::hnsw_index::num_rayon_threads;
     use tempfile::Builder;
 
     use super::*;
@@ -247,10 +243,14 @@ mod tests {
             })
             .collect_vec();
 
+        let permit_cpu_count = num_rayon_threads(0);
+        let permit = CpuPermit::dummy(permit_cpu_count as u32);
+
         merge_optimizer
             .optimize(
                 locked_holder.clone(),
                 suggested_for_merge,
+                permit,
                 &AtomicBool::new(false),
             )
             .unwrap();

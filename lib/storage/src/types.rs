@@ -3,40 +3,47 @@ use std::num::NonZeroUsize;
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
+use collection::common::snapshots_manager::S3Config;
 use collection::config::WalConfig;
 use collection::operations::shared_storage_config::{
-    SharedStorageConfig, DEFAULT_IO_SHARD_TRANSFER_LIMIT,
+    SharedStorageConfig, DEFAULT_IO_SHARD_TRANSFER_LIMIT, DEFAULT_SNAPSHOTS_PATH,
 };
 use collection::operations::types::NodeType;
 use collection::optimizers_builder::OptimizersConfig;
 use collection::shards::shard::PeerId;
+use collection::shards::transfer::ShardTransferMethod;
+use common::defaults;
 use memory::madvise;
 use schemars::JsonSchema;
 use segment::common::anonymize::Anonymize;
 use segment::types::{HnswConfig, QuantizationConfig};
+use semver::Version;
 use serde::{Deserialize, Serialize};
 use tonic::transport::Uri;
 use validator::Validate;
 
 pub type PeerAddressById = HashMap<PeerId, Uri>;
+pub type PeerMetadataById = HashMap<PeerId, PeerMetadata>;
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct PerformanceConfig {
     pub max_search_threads: usize,
-    #[serde(default = "default_max_optimization_threads")]
+    #[serde(default)]
     pub max_optimization_threads: usize,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub update_rate_limit: Option<usize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub search_timeout_sec: Option<usize>,
+    /// CPU budget, how many CPUs (threads) to allocate for an optimization job.
+    /// If 0 - auto selection, keep 1 or more CPUs unallocated depending on CPU size
+    /// If negative - subtract this relative number of CPUs from the available CPUs.
+    /// If positive - use this absolute number of CPUs.
+    #[serde(default)]
+    pub optimizer_cpu_budget: isize,
     #[serde(default = "default_io_shard_transfers_limit")]
     pub incoming_shard_transfers_limit: Option<usize>,
     #[serde(default = "default_io_shard_transfers_limit")]
     pub outgoing_shard_transfers_limit: Option<usize>,
-}
-
-const fn default_max_optimization_threads() -> usize {
-    1
 }
 
 const fn default_io_shard_transfers_limit() -> Option<usize> {
@@ -51,6 +58,8 @@ pub struct StorageConfig {
     #[serde(default = "default_snapshots_path")]
     #[validate(length(min = 1))]
     pub snapshots_path: String,
+    #[serde(default)]
+    pub s3_config: Option<S3Config>,
     #[validate(length(min = 1))]
     #[serde(default)]
     pub temp_path: Option<String>,
@@ -82,6 +91,9 @@ pub struct StorageConfig {
     pub recovery_mode: Option<String>,
     #[serde(default)]
     pub update_concurrency: Option<NonZeroUsize>,
+    /// Default method used for transferring shards.
+    #[serde(default)]
+    pub shard_transfer_method: Option<ShardTransferMethod>,
 }
 
 impl StorageConfig {
@@ -96,14 +108,17 @@ impl StorageConfig {
                 .map(|x| Duration::from_secs(x as u64)),
             self.update_concurrency,
             is_distributed,
+            self.shard_transfer_method,
             self.performance.incoming_shard_transfers_limit,
             self.performance.outgoing_shard_transfers_limit,
+            self.snapshots_path.clone(),
+            self.s3_config.clone(),
         )
     }
 }
 
 fn default_snapshots_path() -> String {
-    "./snapshots".to_string()
+    DEFAULT_SNAPSHOTS_PATH.to_string()
 }
 
 const fn default_on_disk_payload() -> bool {
@@ -115,7 +130,7 @@ const fn default_mmap_advice() -> madvise::Advice {
 }
 
 /// Information of a peer in the cluster
-#[derive(Debug, Deserialize, Serialize, JsonSchema, Clone)]
+#[derive(Debug, Serialize, JsonSchema, Clone)]
 pub struct PeerInfo {
     pub uri: String,
     // ToDo: How long ago was the last communication? In milliseconds
@@ -123,7 +138,7 @@ pub struct PeerInfo {
 }
 
 /// Summary information about the current raft state
-#[derive(Debug, Deserialize, Serialize, JsonSchema, Clone)]
+#[derive(Debug, Serialize, JsonSchema, Clone)]
 pub struct RaftInfo {
     /// Raft divides time into terms of arbitrary length, each beginning with an election.
     /// If a candidate wins the election, it remains the leader for the rest of the term.
@@ -143,7 +158,7 @@ pub struct RaftInfo {
 }
 
 /// Role of the peer in the consensus
-#[derive(Debug, PartialEq, Eq, Clone, Copy, Serialize, JsonSchema, Deserialize)]
+#[derive(Debug, PartialEq, Eq, Clone, Copy, Serialize, JsonSchema)]
 pub enum StateRole {
     // The node is a follower of the leader.
     Follower,
@@ -167,14 +182,16 @@ impl From<raft::StateRole> for StateRole {
 }
 
 /// Message send failures for a particular peer
-#[derive(Debug, Deserialize, Serialize, JsonSchema, Clone, Default)]
+#[derive(Debug, Serialize, JsonSchema, Clone, Default)]
 pub struct MessageSendErrors {
     pub count: usize,
     pub latest_error: Option<String>,
+    /// Timestamp of the latest error
+    pub latest_error_timestamp: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 /// Description of enabled cluster
-#[derive(Debug, Deserialize, Serialize, JsonSchema, Clone)]
+#[derive(Debug, Serialize, JsonSchema, Clone)]
 pub struct ClusterInfo {
     /// ID of this peer
     pub peer_id: PeerId,
@@ -190,7 +207,7 @@ pub struct ClusterInfo {
 }
 
 /// Information about current cluster status and structure
-#[derive(Debug, Deserialize, Serialize, JsonSchema, Clone)]
+#[derive(Debug, Serialize, JsonSchema, Clone)]
 #[serde(tag = "status")]
 #[serde(rename_all = "snake_case")]
 pub enum ClusterStatus {
@@ -199,7 +216,7 @@ pub enum ClusterStatus {
 }
 
 /// Information about current consensus thread status
-#[derive(Debug, Deserialize, Serialize, JsonSchema, Clone)]
+#[derive(Debug, Serialize, JsonSchema, Clone)]
 #[serde(tag = "consensus_thread_status")]
 #[serde(rename_all = "snake_case")]
 pub enum ConsensusThreadStatus {
@@ -253,5 +270,25 @@ impl Anonymize for ClusterStatus {
                 ClusterStatus::Enabled(cluster_info.anonymize())
             }
         }
+    }
+}
+
+/// Metadata describing extra properties for each peer
+#[derive(Debug, Hash, Serialize, Deserialize, Clone, Eq, PartialEq)]
+pub struct PeerMetadata {
+    /// Peer Qdrant version
+    version: Version,
+}
+
+impl PeerMetadata {
+    pub fn current() -> Self {
+        Self {
+            version: defaults::QDRANT_VERSION,
+        }
+    }
+
+    /// Whether this metadata has a different version than our current Qdrant instance.
+    pub fn is_different_version(&self) -> bool {
+        self.version != defaults::QDRANT_VERSION
     }
 }

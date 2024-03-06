@@ -5,6 +5,7 @@ use collection::operations::payload_ops::{DeletePayload, SetPayload};
 use collection::operations::point_ops::{PointInsertOperations, PointsSelector, WriteOrdering};
 use collection::operations::vector_ops::{DeleteVectors, UpdateVectors};
 use schemars::JsonSchema;
+use segment::json_path::{JsonPath, JsonPathInterface};
 use serde::{Deserialize, Serialize};
 use storage::content_manager::toc::TableOfContent;
 use storage::dispatcher::Dispatcher;
@@ -21,8 +22,8 @@ use crate::common::points::{
 #[derive(Deserialize, Validate)]
 struct FieldPath {
     #[serde(rename = "field_name")]
-    #[validate(length(min = 1))]
-    name: String,
+    #[validate(custom = "JsonPath::validate_not_empty")]
+    name: JsonPath,
 }
 
 #[derive(Deserialize, Serialize, JsonSchema, Validate)]
@@ -44,9 +45,10 @@ async fn upsert_points(
     let ordering = params.ordering.unwrap_or_default();
 
     let response = do_upsert_points(
-        toc.get_ref(),
-        &collection.name,
+        toc.into_inner(),
+        collection.into_inner().name,
         operation,
+        None,
         None,
         wait,
         ordering,
@@ -68,9 +70,10 @@ async fn delete_points(
     let ordering = params.ordering.unwrap_or_default();
 
     let response = do_delete_points(
-        toc.get_ref(),
-        &collection.name,
+        toc.into_inner(),
+        collection.into_inner().name,
         operation,
+        None,
         None,
         wait,
         ordering,
@@ -92,9 +95,10 @@ async fn update_vectors(
     let ordering = params.ordering.unwrap_or_default();
 
     let response = do_update_vectors(
-        toc.get_ref(),
-        &collection.name,
+        toc.into_inner(),
+        collection.into_inner().name,
         operation,
+        None,
         None,
         wait,
         ordering,
@@ -116,9 +120,10 @@ async fn delete_vectors(
     let ordering = params.ordering.unwrap_or_default();
 
     let response = do_delete_vectors(
-        toc.get_ref(),
-        &collection.name,
+        toc.into_inner(),
+        collection.into_inner().name,
         operation,
+        None,
         None,
         wait,
         ordering,
@@ -140,9 +145,10 @@ async fn set_payload(
     let ordering = params.ordering.unwrap_or_default();
 
     let response = do_set_payload(
-        toc.get_ref(),
-        &collection.name,
+        toc.into_inner(),
+        collection.into_inner().name,
         operation,
+        None,
         None,
         wait,
         ordering,
@@ -164,9 +170,10 @@ async fn overwrite_payload(
     let ordering = params.ordering.unwrap_or_default();
 
     let response = do_overwrite_payload(
-        toc.get_ref(),
-        &collection.name,
+        toc.into_inner(),
+        collection.into_inner().name,
         operation,
+        None,
         None,
         wait,
         ordering,
@@ -188,9 +195,10 @@ async fn delete_payload(
     let ordering = params.ordering.unwrap_or_default();
 
     let response = do_delete_payload(
-        toc.get_ref(),
-        &collection.name,
+        toc.into_inner(),
+        collection.into_inner().name,
         operation,
+        None,
         None,
         wait,
         ordering,
@@ -212,9 +220,10 @@ async fn clear_payload(
     let ordering = params.ordering.unwrap_or_default();
 
     let response = do_clear_payload(
-        toc.get_ref(),
-        &collection.name,
+        toc.into_inner(),
+        collection.into_inner().name,
         operation,
+        None,
         None,
         wait,
         ordering,
@@ -236,9 +245,10 @@ async fn update_batch(
     let ordering = params.ordering.unwrap_or_default();
 
     let response = do_batch_update_points(
-        &toc,
-        &collection.name,
+        toc.into_inner(),
+        collection.into_inner().name,
         operations.operations,
+        None,
         None,
         wait,
         ordering,
@@ -259,9 +269,10 @@ async fn create_field_index(
     let ordering = params.ordering.unwrap_or_default();
 
     let response = do_create_index(
-        dispatcher.get_ref(),
-        &collection.name,
+        dispatcher.into_inner(),
+        collection.into_inner().name,
         operation,
+        None,
         None,
         wait,
         ordering,
@@ -282,9 +293,10 @@ async fn delete_field_index(
     let ordering = params.ordering.unwrap_or_default();
 
     let response = do_delete_index(
-        dispatcher.get_ref(),
-        &collection.name,
+        dispatcher.into_inner(),
+        collection.into_inner().name,
         field.name.clone(),
+        None,
         None,
         wait,
         ordering,

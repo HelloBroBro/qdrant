@@ -3,6 +3,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use common::types::TelemetryDetail;
+use segment::data_types::order_by::OrderBy;
 use segment::types::{
     ExtendedPointId, Filter, PointIdType, ScoredPoint, WithPayload, WithPayloadInterface,
     WithVector,
@@ -16,7 +18,9 @@ use crate::operations::types::{
     CollectionError, CollectionInfo, CollectionResult, CoreSearchRequestBatch,
     CountRequestInternal, CountResult, PointRequestInternal, Record, UpdateResult,
 };
-use crate::operations::{CollectionUpdateOperations, CreateIndex, FieldIndexOperations};
+use crate::operations::{
+    CollectionUpdateOperations, CreateIndex, FieldIndexOperations, OperationWithClockTag,
+};
 use crate::shards::local_shard::LocalShard;
 use crate::shards::remote_shard::RemoteShard;
 use crate::shards::shard_trait::ShardOperation;
@@ -56,12 +60,13 @@ impl ForwardProxyShard {
             // TODO: Is cancelling `RemoteShard::update` safe for *receiver*?
             self.remote_shard
                 .update(
-                    CollectionUpdateOperations::FieldIndexOperation(
+                    // TODO: Assign clock tag!? 🤔
+                    OperationWithClockTag::from(CollectionUpdateOperations::FieldIndexOperation(
                         FieldIndexOperations::CreateIndex(CreateIndex {
                             field_name: index_key,
                             field_schema: Some(index_type.try_into()?),
                         }),
-                    ),
+                    )),
                     false,
                 )
                 .await?;
@@ -93,6 +98,7 @@ impl ForwardProxyShard {
                 &true.into(),
                 None,
                 runtime_handle,
+                None,
             )
             .await?;
         let next_page_offset = if batch.len() < limit {
@@ -124,7 +130,7 @@ impl ForwardProxyShard {
 
         // TODO: Is cancelling `RemoteShard::update` safe for *receiver*?
         self.remote_shard
-            .update(insert_points_operation, wait)
+            .update(OperationWithClockTag::from(insert_points_operation), wait) // TODO: Assign clock tag!? 🤔
             .await?;
 
         Ok(next_page_offset)
@@ -150,8 +156,8 @@ impl ForwardProxyShard {
         self.wrapped_shard.on_optimizer_config_update().await
     }
 
-    pub fn get_telemetry_data(&self) -> LocalShardTelemetry {
-        self.wrapped_shard.get_telemetry_data()
+    pub fn get_telemetry_data(&self, detail: TelemetryDetail) -> LocalShardTelemetry {
+        self.wrapped_shard.get_telemetry_data(detail)
     }
 
     pub fn update_tracker(&self) -> &UpdateTracker {
@@ -162,21 +168,33 @@ impl ForwardProxyShard {
 #[async_trait]
 impl ShardOperation for ForwardProxyShard {
     /// Update `wrapped_shard` while keeping track of the changed points
+    ///
+    /// # Cancel safety
+    ///
+    /// This method is *not* cancel safe.
     async fn update(
         &self,
-        operation: CollectionUpdateOperations,
+        operation: OperationWithClockTag,
         wait: bool,
     ) -> CollectionResult<UpdateResult> {
+        // If we apply `local_shard` update, we *have to* execute `remote_shard` update to completion
+        // (or we *might* introduce an inconsistency between shards?), so this method is not cancel
+        // safe.
+
         let _update_lock = self.update_lock.lock().await;
+
         let local_shard = &self.wrapped_shard;
+
         // Shard update is within a write lock scope, because we need a way to block the shard updates
         // during the transfer restart and finalization.
-        local_shard.update(operation.clone(), wait).await?;
+        let result = local_shard.update(operation.clone(), wait).await?;
 
         self.remote_shard
             .update(operation, false)
             .await
-            .map_err(|err| CollectionError::forward_proxy_error(self.remote_shard.peer_id, err))
+            .map_err(|err| CollectionError::forward_proxy_error(self.remote_shard.peer_id, err))?;
+
+        Ok(result)
     }
 
     /// Forward read-only `scroll_by` to `wrapped_shard`
@@ -188,6 +206,7 @@ impl ShardOperation for ForwardProxyShard {
         with_vector: &WithVector,
         filter: Option<&Filter>,
         search_runtime_handle: &Handle,
+        order_by: Option<&OrderBy>,
     ) -> CollectionResult<Vec<Record>> {
         let local_shard = &self.wrapped_shard;
         local_shard
@@ -198,6 +217,7 @@ impl ShardOperation for ForwardProxyShard {
                 with_vector,
                 filter,
                 search_runtime_handle,
+                order_by,
             )
             .await
     }

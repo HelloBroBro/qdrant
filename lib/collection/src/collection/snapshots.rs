@@ -3,13 +3,13 @@ use std::path::{Path, PathBuf};
 
 use io::file_operations::read_json;
 use segment::common::version::StorageVersion as _;
-use tempfile::TempPath;
 use tokio::fs;
 
 use super::Collection;
 use crate::collection::CollectionVersion;
+use crate::common::snapshots_manager::SnapshotStorageManager;
 use crate::config::{CollectionConfig, ShardingMethod};
-use crate::operations::snapshot_ops::{self, SnapshotDescription};
+use crate::operations::snapshot_ops::SnapshotDescription;
 use crate::operations::types::{CollectionError, CollectionResult, NodeType};
 use crate::shards::local_shard::LocalShard;
 use crate::shards::remote_shard::RemoteShard;
@@ -20,8 +20,13 @@ use crate::shards::shard_holder::{ShardKeyMapping, SHARD_KEY_MAPPING_FILE};
 use crate::shards::shard_versioning;
 
 impl Collection {
+    pub fn get_snapshots_storage_manager(&self) -> SnapshotStorageManager {
+        SnapshotStorageManager::new(self.shared_storage_config.s3_config.clone())
+    }
+
     pub async fn list_snapshots(&self) -> CollectionResult<Vec<SnapshotDescription>> {
-        snapshot_ops::list_snapshots_in_directory(&self.snapshots_path).await
+        let snapshot_manager = self.get_snapshots_storage_manager();
+        snapshot_manager.list_snapshots(&self.snapshots_path).await
     }
 
     /// Creates a snapshot of the collection.
@@ -43,10 +48,9 @@ impl Collection {
         this_peer_id: PeerId,
     ) -> CollectionResult<SnapshotDescription> {
         let snapshot_name = format!(
-            "{}-{}-{}.snapshot",
+            "{}-{this_peer_id}-{}.snapshot",
             self.name(),
-            this_peer_id,
-            chrono::Utc::now().format("%Y-%m-%d-%H-%M-%S")
+            chrono::Utc::now().format("%Y-%m-%d-%H-%M-%S"),
         );
 
         // Final location of snapshot
@@ -112,7 +116,7 @@ impl Collection {
             .tempfile_in(global_temp_dir)?;
 
         // Archive snapshot folder into a single file
-        log::debug!("Archiving snapshot {:?}", &snapshot_temp_target_dir_path);
+        log::debug!("Archiving snapshot {snapshot_temp_target_dir_path:?}");
         let archiving = tokio::task::spawn_blocking(move || -> CollectionResult<_> {
             let mut builder = tar::Builder::new(snapshot_temp_arc_file.as_file_mut());
             // archive recursively collection directory `snapshot_path_with_arc_extension` into `snapshot_path`
@@ -124,23 +128,10 @@ impl Collection {
         });
         snapshot_temp_arc_file = archiving.await??;
 
-        // Move snapshot to permanent location.
-        // We can't move right away, because snapshot folder can be on another mounting point.
-        // We can't copy to the target location directly, because copy is not atomic.
-        // So we copy to the final location with a temporary name and then rename atomically.
-        let snapshot_path_tmp_move = snapshot_path.with_extension("tmp");
-
-        // Ensure that the temporary file is deleted on error
-        let _temp_path = TempPath::from_path(&snapshot_path_tmp_move);
-        fs::copy(&snapshot_temp_arc_file.path(), &snapshot_path_tmp_move).await?;
-        fs::rename(&snapshot_path_tmp_move, &snapshot_path).await?;
-
-        log::info!(
-            "Collection snapshot {} completed into {:?}",
-            snapshot_name,
-            snapshot_path
-        );
-        snapshot_ops::get_snapshot_description(&snapshot_path).await
+        let snapshot_manager = self.get_snapshots_storage_manager();
+        snapshot_manager
+            .store_file(snapshot_temp_arc_file.path(), snapshot_path.as_path())
+            .await
     }
 
     /// Restore collection from snapshot

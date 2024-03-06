@@ -5,7 +5,8 @@ use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
 use atomic_refcell::AtomicRefCell;
-use common::types::{PointOffsetType, ScoredPointOffset};
+use common::cpu::CpuPermit;
+use common::types::{PointOffsetType, ScoredPointOffset, TelemetryDetail};
 use parking_lot::Mutex;
 use schemars::_serde_json::Value;
 
@@ -13,7 +14,6 @@ use crate::common::operation_error::OperationResult;
 use crate::common::operation_time_statistics::{
     OperationDurationStatistics, OperationDurationsAggregator, ScopeDurationMeasurer,
 };
-use crate::common::utils::JsonPathPayload;
 use crate::common::Flusher;
 use crate::data_types::vectors::{QueryVector, VectorRef};
 use crate::id_tracker::IdTrackerSS;
@@ -21,6 +21,7 @@ use crate::index::field_index::{CardinalityEstimation, PayloadBlockCondition};
 use crate::index::payload_config::PayloadConfig;
 use crate::index::struct_payload_index::StructPayloadIndex;
 use crate::index::{PayloadIndex, VectorIndex};
+use crate::json_path::JsonPath;
 use crate::payload_storage::{ConditionCheckerSS, FilterContext};
 use crate::telemetry::VectorIndexSearchesTelemetry;
 use crate::types::{
@@ -122,7 +123,7 @@ impl PayloadIndex for PlainPayloadIndex {
     fn estimate_nested_cardinality(
         &self,
         query: &Filter,
-        _nested_path: &JsonPathPayload,
+        _nested_path: &JsonPath,
     ) -> CardinalityEstimation {
         self.estimate_cardinality(query)
     }
@@ -156,7 +157,12 @@ impl PayloadIndex for PlainPayloadIndex {
         Box::new(vec![].into_iter())
     }
 
-    fn assign(&mut self, _point_id: PointOffsetType, _payload: &Payload) -> OperationResult<()> {
+    fn assign(
+        &mut self,
+        _point_id: PointOffsetType,
+        _payload: &Payload,
+        _key: &Option<JsonPath>,
+    ) -> OperationResult<()> {
         unreachable!()
     }
 
@@ -271,15 +277,25 @@ impl VectorIndex for PlainIndex {
         }
     }
 
-    fn build_index(&mut self, _stopped: &AtomicBool) -> OperationResult<()> {
+    fn build_index(
+        &mut self,
+        _permit: Arc<CpuPermit>,
+        _stopped: &AtomicBool,
+    ) -> OperationResult<()> {
         Ok(())
     }
 
-    fn get_telemetry_data(&self) -> VectorIndexSearchesTelemetry {
+    fn get_telemetry_data(&self, detail: TelemetryDetail) -> VectorIndexSearchesTelemetry {
         VectorIndexSearchesTelemetry {
             index_name: None,
-            unfiltered_plain: self.unfiltered_searches_telemetry.lock().get_statistics(),
-            filtered_plain: self.filtered_searches_telemetry.lock().get_statistics(),
+            unfiltered_plain: self
+                .unfiltered_searches_telemetry
+                .lock()
+                .get_statistics(detail),
+            filtered_plain: self
+                .filtered_searches_telemetry
+                .lock()
+                .get_statistics(detail),
             unfiltered_hnsw: OperationDurationStatistics::default(),
             filtered_small_cardinality: OperationDurationStatistics::default(),
             filtered_large_cardinality: OperationDurationStatistics::default(),

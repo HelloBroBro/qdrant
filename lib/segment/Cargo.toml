@@ -17,7 +17,7 @@ multiling-korean = ["charabia/korean"]
 criterion = "0.5"
 rmp-serde = "~1.1"
 rand_distr = "0.4.3"
-walkdir = "2.4.0"
+walkdir = "2.5.0"
 rstest = "0.18.2"
 proptest = "1.4.0"
 
@@ -26,57 +26,64 @@ pprof = { version = "0.12", features = ["flamegraph", "prost-codec"] }
 
 
 [dependencies]
-tempfile = "3.8.1"
-parking_lot = "0.12"
-rayon = "1.8.0"
-num_cpus = "1.16"
+bitpacking = "0.9.2"
+tempfile = "3.10.1"
+parking_lot = { workspace = true }
+rayon = "1.9.0"
 itertools = "0.12"
-rocksdb = { version = "0.21.0", default-features = false, features = [ "snappy" ] }
-uuid = { version = "1.6", features = ["v4", "serde"] }
+rocksdb = { version = "0.22.0", default-features = false, features = ["snappy"] }
+uuid = { workspace = true }
 bincode = "1.3"
-serde = { version = "~1.0", features = ["derive", "rc"] }
-serde_json = "~1.0"
-serde_cbor = "0.11.2"
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_cbor = { workspace = true }
 serde-value = "0.7"
 ordered-float = "4.2"
 thiserror = "1.0"
 atomic_refcell = "0.1.13"
-atomicwrites = "0.4.2"
-memmap2 = "0.9.2"
-schemars = { version = "0.8.16", features = ["uuid1", "preserve_order", "chrono"] }
+atomicwrites = "0.4.3"
+memmap2 = "0.9.4"
+schemars = { workspace = true }
 log = "0.4"
-geo = "0.27.0"
+geo = "0.28.0"
 geohash = "0.13.0"
-num-traits = "0.2.16"
-num-derive = "0.4.1"
+num-traits = "0.2.18"
+num-derive = "0.4.2"
+num-cmp = "0.1.0"
 rand = "0.8"
 bitvec = "1.0.1"
 seahash = "4.1.0"
 tar = "0.4.40"
 fs_extra = "1.3.0"
-semver = "1.0.20"
+semver = "1.0.22"
 tinyvec = { version = "1.6.0", features = ["alloc"] }
 quantization = { git = "https://github.com/qdrant/quantization.git" }
 validator = { version = "0.16", features = ["derive"] }
-chrono = { version = "0.4.31", features = ["serde"] }
-smol_str = "0.2.0"
-lazy_static = "1.4"
+chrono = { version = "0.4.34", features = ["serde"] }
+smol_str = { version = "0.2.1", features = ["serde"] }
+fnv = { workspace = true }
+indexmap = { workspace = true }
+ahash = { version = "0.8.11", features = ["serde"] }
+smallvec = "1.13.1"
+is_sorted = "0.1.1"
 
-sysinfo = "0.29"
-futures = "0.3.29"
-charabia = { version = "0.8.5", default-features = false, features = ["greek", "hebrew", "thai"] }
+sysinfo = "0.30"
+charabia = { version = "0.8.7", default-features = false, features = ["greek", "hebrew", "thai"] }
 
 common = { path = "../common/common" }
 io = { path = "../common/io" }
 memory = { path = "../common/memory" }
 sparse = { path = "../sparse" }
 
-tracing = { version = "0.1", features = ["async-await"], optional = true }
+tracing = { workspace = true, optional = true }
+macro_rules_attribute = "0.2.0"
+generic-tests = "0.1.2"
+nom = "7.1.3"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 cgroups-rs = "0.3"
 procfs = { version = "0.16", default-features = false }
-io-uring = "0.6.2"
+io-uring = "0.6.3"
 
 [[bench]]
 name = "vector_search"

@@ -4,12 +4,15 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
+use common::types::TelemetryDetail;
 use parking_lot::{RwLock, RwLockUpgradableReadGuard};
 use segment::common::operation_error::{OperationResult, SegmentFailedState};
 use segment::data_types::named_vectors::NamedVectors;
+use segment::data_types::order_by::OrderingValue;
 use segment::data_types::vectors::{QueryVector, Vector};
 use segment::entry::entry_point::SegmentEntry;
 use segment::index::field_index::CardinalityEstimation;
+use segment::json_path::JsonPath;
 use segment::telemetry::SegmentTelemetry;
 use segment::types::{
     Condition, Filter, Payload, PayloadFieldSchema, PayloadKeyType, PayloadKeyTypeRef, PointIdType,
@@ -124,7 +127,9 @@ impl ProxySegment {
         let mut write_segment = segment_arc.write();
 
         write_segment.upsert_point(op_num, point_id, all_vectors)?;
-        write_segment.set_full_payload(op_num, point_id, &payload)?;
+        if !payload.is_empty() {
+            write_segment.set_full_payload(op_num, point_id, &payload)?;
+        }
 
         Ok(true)
     }
@@ -371,12 +376,13 @@ impl SegmentEntry for ProxySegment {
         op_num: SeqNumberType,
         point_id: PointIdType,
         payload: &Payload,
+        key: &Option<JsonPath>,
     ) -> OperationResult<bool> {
         self.move_if_exists(op_num, point_id)?;
         self.write_segment
             .get()
             .write()
-            .set_payload(op_num, point_id, payload)
+            .set_payload(op_num, point_id, payload, key)
     }
 
     fn delete_payload(
@@ -504,6 +510,37 @@ impl SegmentEntry for ProxySegment {
         read_points.append(&mut write_segment_points);
         read_points.sort_unstable();
         read_points
+    }
+
+    fn read_ordered_filtered<'a>(
+        &'a self,
+        limit: Option<usize>,
+        filter: Option<&'a Filter>,
+        order_by: &'a segment::data_types::order_by::OrderBy,
+    ) -> OperationResult<Vec<(OrderingValue, PointIdType)>> {
+        let deleted_points = self.deleted_points.read();
+        let mut read_points = if deleted_points.is_empty() {
+            self.wrapped_segment
+                .get()
+                .read()
+                .read_ordered_filtered(limit, filter, order_by)?
+        } else {
+            let wrapped_filter =
+                self.add_deleted_points_condition_to_filter(filter, &deleted_points);
+            self.wrapped_segment.get().read().read_ordered_filtered(
+                limit,
+                Some(&wrapped_filter),
+                order_by,
+            )?
+        };
+        let mut write_segment_points = self
+            .write_segment
+            .get()
+            .read()
+            .read_ordered_filtered(limit, filter, order_by)?;
+        read_points.append(&mut write_segment_points);
+        read_points.sort_unstable();
+        Ok(read_points)
     }
 
     /// Read points in [from; to) range
@@ -673,7 +710,7 @@ impl SegmentEntry for ProxySegment {
         if self.version() > op_num {
             return Ok(false);
         }
-        self.deleted_indexes.write().insert(key.into());
+        self.deleted_indexes.write().insert(key.clone());
         self.created_indexes.write().remove(key);
         self.write_segment
             .get()
@@ -704,7 +741,7 @@ impl SegmentEntry for ProxySegment {
 
         self.created_indexes
             .write()
-            .insert(key.into(), payload_schema.to_owned());
+            .insert(key.to_owned(), payload_schema.to_owned());
         self.deleted_indexes.write().remove(key);
 
         Ok(true)
@@ -791,8 +828,8 @@ impl SegmentEntry for ProxySegment {
         Ok(archive_path)
     }
 
-    fn get_telemetry_data(&self) -> SegmentTelemetry {
-        self.wrapped_segment.get().read().get_telemetry_data()
+    fn get_telemetry_data(&self, detail: TelemetryDetail) -> SegmentTelemetry {
+        self.wrapped_segment.get().read().get_telemetry_data(detail)
     }
 }
 
@@ -870,7 +907,7 @@ mod tests {
 
         assert!(!proxy_segment.write_segment.get().read().has_point(2.into()));
 
-        let payload_key = "color".to_owned();
+        let payload_key = "color".parse().unwrap();
         proxy_segment
             .delete_payload(103, 2.into(), &payload_key)
             .unwrap();
@@ -1086,7 +1123,7 @@ mod tests {
         let original_segment = LockedSegment::new(build_segment_1(dir.path()));
 
         let filter = Filter::new_must_not(Condition::Field(FieldCondition::new_match(
-            "color".to_string(),
+            "color".parse().unwrap(),
             "blue".to_string().into(),
         )));
 
@@ -1131,6 +1168,7 @@ mod tests {
                 101,
                 3.into(),
                 &json!({ "color": vec!["red".to_owned()] }).into(),
+                &None,
             )
             .unwrap();
         let proxy_res = proxy_segment.read_range(None, Some(10.into()));
@@ -1153,7 +1191,11 @@ mod tests {
         original_segment
             .get()
             .write()
-            .create_field_index(10, "color", Some(&PayloadSchemaType::Keyword.into()))
+            .create_field_index(
+                10,
+                &"color".parse().unwrap(),
+                Some(&PayloadSchemaType::Keyword.into()),
+            )
             .unwrap();
 
         let mut proxy_segment = ProxySegment::new(
@@ -1170,18 +1212,22 @@ mod tests {
             .get()
             .read()
             .get_indexed_fields()
-            .contains_key("color"));
+            .contains_key(&"color".parse().unwrap()));
 
         original_segment
             .get()
             .write()
-            .create_field_index(11, "location", Some(&PayloadSchemaType::Geo.into()))
+            .create_field_index(
+                11,
+                &"location".parse().unwrap(),
+                Some(&PayloadSchemaType::Geo.into()),
+            )
             .unwrap();
 
         original_segment
             .get()
             .write()
-            .delete_field_index(12, "color")
+            .delete_field_index(12, &"color".parse().unwrap())
             .unwrap();
 
         proxy_segment.replicate_field_indexes(0).unwrap();
@@ -1190,12 +1236,12 @@ mod tests {
             .get()
             .read()
             .get_indexed_fields()
-            .contains_key("location"));
+            .contains_key(&"location".parse().unwrap()));
         assert!(!write_segment
             .get()
             .read()
             .get_indexed_fields()
-            .contains_key("color"));
+            .contains_key(&"color".parse().unwrap()));
     }
 
     #[test]

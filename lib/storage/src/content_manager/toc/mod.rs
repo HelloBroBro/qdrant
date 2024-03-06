@@ -1,4 +1,5 @@
 mod collection_container;
+use common::types::TelemetryDetail;
 mod collection_meta_ops;
 mod create_collection;
 mod locks;
@@ -27,9 +28,9 @@ use collection::shards::replica_set;
 use collection::shards::replica_set::{AbortShardTransfer, ReplicaState};
 use collection::shards::shard::{PeerId, ShardId};
 use collection::telemetry::CollectionTelemetry;
+use common::cpu::{get_num_cpus, CpuBudget};
 use futures::future::try_join_all;
 use futures::Future;
-use segment::common::cpu::get_num_cpus;
 use tokio::runtime::Runtime;
 use tokio::sync::{Mutex, RwLock, RwLockReadGuard, Semaphore};
 use tonic::codegen::InterceptedService;
@@ -59,6 +60,9 @@ pub struct TableOfContent {
     search_runtime: Runtime,
     update_runtime: Runtime,
     general_runtime: Runtime,
+    /// Global CPU budget in number of cores for all optimization tasks.
+    /// Assigns CPU permits to tasks to limit overall resource utilization.
+    optimizer_cpu_budget: CpuBudget,
     alias_persistence: RwLock<AliasPersistence>,
     pub this_peer_id: PeerId,
     channel_service: ChannelService,
@@ -87,6 +91,7 @@ impl TableOfContent {
         search_runtime: Runtime,
         update_runtime: Runtime,
         general_runtime: Runtime,
+        optimizer_cpu_budget: CpuBudget,
         channel_service: ChannelService,
         this_peer_id: PeerId,
         consensus_proposal_sender: Option<OperationSender>,
@@ -110,8 +115,8 @@ impl TableOfContent {
 
             if !CollectionConfig::check(&collection_path) {
                 log::warn!(
-                    "Collection config is not found in the collection directory: {:?}, skipping",
-                    collection_path
+                    "Collection config is not found in the collection directory: {}, skipping",
+                    collection_path.display(),
                 );
                 continue;
             }
@@ -127,7 +132,7 @@ impl TableOfContent {
             create_dir_all(&collection_snapshots_path).unwrap_or_else(|e| {
                 panic!("Can't create a directory for snapshot of {collection_name}: {e}")
             });
-            log::info!("Loading collection: {}", collection_name);
+            log::info!("Loading collection: {collection_name}");
             let collection = general_runtime.block_on(Collection::load(
                 collection_name.clone(),
                 this_peer_id,
@@ -153,6 +158,7 @@ impl TableOfContent {
                 ),
                 Some(search_runtime.handle().clone()),
                 Some(update_runtime.handle().clone()),
+                optimizer_cpu_budget.clone(),
             ));
 
             collections.insert(collection_name, collection);
@@ -169,8 +175,7 @@ impl TableOfContent {
                     // Select number of working threads as a guess.
                     let limit = max(get_num_cpus(), 2);
                     log::debug!(
-                        "Auto adjusting update rate limit to {} parallel update requests",
-                        limit
+                        "Auto adjusting update rate limit to {limit} parallel update requests"
                     );
                     Some(Semaphore::new(limit))
                 } else {
@@ -185,6 +190,7 @@ impl TableOfContent {
             search_runtime,
             update_runtime,
             general_runtime,
+            optimizer_cpu_budget,
             alias_persistence: RwLock::new(alias_persistence),
             this_peer_id,
             channel_service,
@@ -350,11 +356,7 @@ impl TableOfContent {
     ) -> Result<(), StorageError> {
         // TODO: Ensure cancel safety!
 
-        log::info!(
-            "Initiating receiving shard {}:{}",
-            collection_name,
-            shard_id
-        );
+        log::info!("Initiating receiving shard {collection_name}:{shard_id}");
 
         // TODO: Ensure cancel safety!
         let initiate_shard_transfer_future = self
@@ -395,12 +397,12 @@ impl TableOfContent {
         false
     }
 
-    pub async fn get_telemetry_data(&self) -> Vec<CollectionTelemetry> {
+    pub async fn get_telemetry_data(&self, detail: TelemetryDetail) -> Vec<CollectionTelemetry> {
         let mut result = Vec::new();
         let all_collections = self.all_collections().await;
         for collection_name in &all_collections {
             if let Ok(collection) = self.get_collection(collection_name).await {
-                result.push(collection.get_telemetry_data().await);
+                result.push(collection.get_telemetry_data(detail).await);
             }
         }
         result

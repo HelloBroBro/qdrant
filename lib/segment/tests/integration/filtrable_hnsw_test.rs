@@ -1,7 +1,9 @@
 use std::collections::HashMap;
 use std::sync::atomic::AtomicBool;
+use std::sync::Arc;
 
-use common::types::PointOffsetType;
+use common::cpu::CpuPermit;
+use common::types::{PointOffsetType, TelemetryDetail};
 use itertools::Itertools;
 use rand::prelude::StdRng;
 use rand::{Rng, SeedableRng};
@@ -11,6 +13,7 @@ use segment::entry::entry_point::SegmentEntry;
 use segment::fixtures::payload_fixtures::{random_int_payload, random_vector};
 use segment::index::hnsw_index::graph_links::GraphLinksRam;
 use segment::index::hnsw_index::hnsw::HNSWIndex;
+use segment::index::hnsw_index::num_rayon_threads;
 use segment::index::{PayloadIndex, VectorIndex};
 use segment::segment_constructor::build_segment;
 use segment::types::{
@@ -22,6 +25,8 @@ use segment::vector_storage::query::discovery_query::DiscoveryQuery;
 use segment::vector_storage::query::reco_query::RecoQuery;
 use serde_json::json;
 use tempfile::Builder;
+
+use crate::utils::path;
 
 const MAX_EXAMPLE_PAIRS: usize = 4;
 
@@ -145,6 +150,9 @@ fn _test_filterable_hnsw(
         payload_m: None,
     };
 
+    let permit_cpu_count = num_rayon_threads(hnsw_config.max_indexing_threads);
+    let permit = Arc::new(CpuPermit::dummy(permit_cpu_count as u32));
+
     let vector_storage = &segment.vector_data[DEFAULT_VECTOR_NAME].vector_storage;
     let quantized_vectors = &segment.vector_data[DEFAULT_VECTOR_NAME].quantized_vectors;
     let mut hnsw_index = HNSWIndex::<GraphLinksRam>::open(
@@ -157,15 +165,15 @@ fn _test_filterable_hnsw(
     )
     .unwrap();
 
-    hnsw_index.build_index(&stopped).unwrap();
+    hnsw_index.build_index(permit.clone(), &stopped).unwrap();
 
     payload_index_ptr
         .borrow_mut()
-        .set_indexed(int_key, PayloadSchemaType::Integer.into())
+        .set_indexed(&path(int_key), PayloadSchemaType::Integer.into())
         .unwrap();
     let borrowed_payload_index = payload_index_ptr.borrow();
     let blocks = borrowed_payload_index
-        .payload_blocks(int_key, indexing_threshold)
+        .payload_blocks(&path(int_key), indexing_threshold)
         .collect_vec();
     for block in blocks.iter() {
         assert!(
@@ -197,7 +205,7 @@ fn _test_filterable_hnsw(
         "not all points are covered by payload blocks"
     );
 
-    hnsw_index.build_index(&stopped).unwrap();
+    hnsw_index.build_index(permit, &stopped).unwrap();
 
     let top = 3;
     let mut hits = 0;
@@ -210,7 +218,7 @@ fn _test_filterable_hnsw(
         let right_range = left_range + range_size;
 
         let filter = Filter::new_must(Condition::Field(FieldCondition::new_range(
-            int_key.to_owned(),
+            path(int_key),
             Range {
                 lt: None,
                 gt: None,
@@ -237,7 +245,7 @@ fn _test_filterable_hnsw(
         // check that search was performed using HNSW index
         assert_eq!(
             hnsw_index
-                .get_telemetry_data()
+                .get_telemetry_data(TelemetryDetail::default())
                 .filtered_large_cardinality
                 .count,
             i + 1

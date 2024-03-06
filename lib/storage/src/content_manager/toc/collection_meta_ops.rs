@@ -1,10 +1,12 @@
 use std::collections::HashSet;
 use std::path::Path;
 
+use async_recursion::async_recursion;
 use collection::collection_state;
 use collection::config::ShardingMethod;
 use collection::shards::collection_shard_distribution::CollectionShardDistribution;
 use collection::shards::replica_set::ReplicaState;
+use collection::shards::transfer::ShardTransfer;
 use collection::shards::{transfer, CollectionId};
 use uuid::Uuid;
 
@@ -239,6 +241,7 @@ impl TableOfContent {
         Ok(true)
     }
 
+    #[async_recursion]
     async fn handle_transfer(
         &self,
         collection_id: CollectionId,
@@ -339,6 +342,48 @@ impl TableOfContent {
                     )
                     .await?;
             }
+            ShardTransferOperations::Restart(transfer_restart) => {
+                let transfers: HashSet<transfer::ShardTransfer> =
+                    collection.state().await.transfers;
+
+                let transfer_key = transfer_restart.key();
+
+                let Some(old_transfer) = transfer::helpers::get_transfer(&transfer_key, &transfers)
+                else {
+                    return Err(StorageError::bad_request(format!(
+                        "There is no transfer for shard {} from {} to {}",
+                        transfer_key.shard_id, transfer_key.from, transfer_key.to,
+                    )));
+                };
+
+                if old_transfer.method == Some(transfer_restart.method) {
+                    return Err(StorageError::bad_request(format!(
+                        "Cannot restart transfer for shard {} from {} to {}, its configuration did not change",
+                        transfer_restart.shard_id, transfer_restart.from, transfer_restart.to,
+                    )));
+                }
+
+                // Abort and start transfer
+                self.handle_transfer(
+                    collection_id.clone(),
+                    ShardTransferOperations::Abort {
+                        transfer: transfer_restart.key(),
+                        reason: "restart transfer".into(),
+                    },
+                )
+                .await?;
+
+                let new_transfer = ShardTransfer {
+                    shard_id: transfer_restart.shard_id,
+                    from: transfer_restart.from,
+                    to: transfer_restart.to,
+                    sync: old_transfer.sync, // Preserve sync flag from the old transfer
+                    method: Some(transfer_restart.method),
+                };
+
+                self.handle_transfer(collection_id, ShardTransferOperations::Start(new_transfer))
+                    .await?;
+            }
             ShardTransferOperations::Finish(transfer) => {
                 // Validate transfer exists to prevent double handling
                 transfer::helpers::validate_transfer_exists(
@@ -347,27 +392,59 @@ impl TableOfContent {
                 )?;
                 collection.finish_shard_transfer(transfer).await?;
             }
-            ShardTransferOperations::SnapshotRecovered(transfer) => {
+            ShardTransferOperations::SnapshotRecovered(transfer)
+            | ShardTransferOperations::RecoveryToPartial(transfer) => {
                 // Validate transfer exists to prevent double handling
                 transfer::helpers::validate_transfer_exists(
                     &transfer,
                     &collection.state().await.transfers,
                 )?;
 
-                // Set shard state from `PartialSnapshot` to `Partial`
-                let operation = SetShardReplicaState {
-                    collection_name: collection_id,
-                    shard_id: transfer.shard_id,
-                    peer_id: transfer.to,
-                    state: ReplicaState::Partial,
-                    from_state: Some(ReplicaState::PartialSnapshot),
+                let collection = self.get_collection(&collection_id).await?;
+
+                let current_state = collection
+                    .state()
+                    .await
+                    .shards
+                    .get(&transfer.shard_id)
+                    .and_then(|info| info.replicas.get(&transfer.to))
+                    .copied();
+
+                let Some(current_state) = current_state else {
+                    return Err(StorageError::bad_input(format!(
+                        "Replica {} of {collection_id}:{} does not exist",
+                        transfer.to, transfer.shard_id,
+                    )));
                 };
+
+                match current_state {
+                    ReplicaState::PartialSnapshot | ReplicaState::Recovery => (),
+                    _ => {
+                        return Err(StorageError::bad_input(format!(
+                            "Replica {} of {collection_id}:{} has unexpected {current_state:?} \
+                             (expected {:?} or {:?})",
+                            transfer.to,
+                            transfer.shard_id,
+                            ReplicaState::PartialSnapshot,
+                            ReplicaState::Recovery,
+                        )))
+                    }
+                }
+
                 log::debug!(
                     "Set shard replica state from {:?} to {:?} after snapshot recovery",
-                    ReplicaState::PartialSnapshot,
+                    current_state,
                     ReplicaState::Partial,
                 );
-                self.set_shard_replica_state(operation).await?;
+
+                collection
+                    .set_shard_replica_state(
+                        transfer.shard_id,
+                        transfer.to,
+                        ReplicaState::Partial,
+                        Some(current_state),
+                    )
+                    .await?;
             }
             ShardTransferOperations::Abort { transfer, reason } => {
                 // Validate transfer exists to prevent double handling
