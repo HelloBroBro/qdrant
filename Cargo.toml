@@ -1,6 +1,6 @@
 [package]
 name = "qdrant"
-version = "1.8.1"
+version = "1.8.2"
 authors = [
     "Andrey Vasnetsov <andrey@vasnetsov.com>",
     "Qdrant Team <info@qdrant.tech>",
@@ -56,7 +56,7 @@ itertools = "0.12"
 anyhow = "1.0.80"
 futures = { workspace = true }
 futures-util = { workspace = true }
-clap = { version = "4.5.1", features = ["derive"] }
+clap = { version = "4.5.2", features = ["derive"] }
 serde_cbor = { workspace = true }
 uuid = { workspace = true }
 sys-info = "0.9.1"
@@ -98,6 +98,7 @@ segment = { path = "lib/segment" }
 collection = { path = "lib/collection" }
 storage = { path = "lib/storage" }
 api = { path = "lib/api" }
+rbac = { path = "lib/rbac" }
 actix-multipart = "0.6.1"
 constant_time_eq = "0.3.0"
 
@@ -107,6 +108,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tracing-log = { version = "0.2", default-features = false, features = ["log-tracer", "std"] }
 console-subscriber = { version = "0.1", default-features = false, features = ["parking_lot"], optional = true }
 tracing-tracy = { version = "0.11.0", features = ["ondemand"], optional = true }
+actix-web-extras = "0.1.0"
 
 # Backtrace
 [target.'cfg(target_os = "linux")'.dependencies]
