@@ -28,6 +28,8 @@ pub enum StorageError {
     Timeout { description: String },
     #[error("Checksum mismatch: expected {expected}, actual {actual}")]
     ChecksumMismatch { expected: String, actual: String },
+    #[error("Unauthorized: {description}")]
+    Unauthorized { description: String },
 }
 
 impl StorageError {
@@ -56,10 +58,22 @@ impl StorageError {
         }
     }
 
+    pub fn not_found(description: impl Into<String>) -> StorageError {
+        StorageError::NotFound {
+            description: description.into(),
+        }
+    }
+
     pub fn checksum_mismatch(expected: impl Into<String>, actual: impl Into<String>) -> Self {
         StorageError::ChecksumMismatch {
             expected: expected.into(),
             actual: actual.into(),
+        }
+    }
+
+    pub fn unauthorized(description: impl Into<String>) -> StorageError {
+        StorageError::Unauthorized {
+            description: description.into(),
         }
     }
 

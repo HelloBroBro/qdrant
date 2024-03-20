@@ -1,11 +1,12 @@
 use std::borrow::Cow;
 use std::collections::HashMap;
 
+use api::rest::{BatchVectorStruct, VectorStruct};
 use itertools::izip;
 use schemars::JsonSchema;
 use segment::common::utils::transpose_map_into_named_vector;
 use segment::data_types::named_vectors::NamedVectors;
-use segment::data_types::vectors::{BatchVectorStruct, Vector, VectorStruct, DEFAULT_VECTOR_NAME};
+use segment::data_types::vectors::{Vector, DEFAULT_VECTOR_NAME};
 use segment::types::{Filter, Payload, PointIdType};
 use serde::{Deserialize, Serialize};
 use validator::Validate;
@@ -164,7 +165,36 @@ pub struct PointsList {
     pub shard_key: Option<ShardKeySelector>,
 }
 
-#[derive(Debug, Deserialize, Serialize, Clone, JsonSchema)]
+impl<'de> serde::Deserialize<'de> for PointInsertOperations {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = serde_json::Value::deserialize(deserializer)?;
+        match value {
+            serde_json::Value::Object(map) => {
+                if map.contains_key("batch") {
+                    PointsBatch::deserialize(serde_json::Value::Object(map))
+                        .map(PointInsertOperations::PointsBatch)
+                        .map_err(serde::de::Error::custom)
+                } else if map.contains_key("points") {
+                    PointsList::deserialize(serde_json::Value::Object(map))
+                        .map(PointInsertOperations::PointsList)
+                        .map_err(serde::de::Error::custom)
+                } else {
+                    Err(serde::de::Error::custom(
+                        "Invalid PointInsertOperations format",
+                    ))
+                }
+            }
+            _ => Err(serde::de::Error::custom(
+                "Invalid PointInsertOperations format",
+            )),
+        }
+    }
+}
+
+#[derive(Debug, Serialize, Clone, JsonSchema)]
 #[serde(untagged)]
 pub enum PointInsertOperations {
     /// Inset points from a batch.
@@ -386,9 +416,10 @@ impl SplitByShard for Batch {
                             let name = name.into_owned();
                             let vector: Vector = vector.to_owned();
                             match &mut batch.vectors {
-                                BatchVectorStruct::Multi(batch_vectors) => {
-                                    batch_vectors.entry(name).or_default().push(vector)
-                                }
+                                BatchVectorStruct::Multi(batch_vectors) => batch_vectors
+                                    .entry(name)
+                                    .or_default()
+                                    .push(api::rest::Vector::from(vector)),
                                 _ => unreachable!(), // TODO(sparse) propagate error
                             }
                         }
@@ -431,9 +462,10 @@ impl SplitByShard for Batch {
                             let name = name.into_owned();
                             let vector: Vector = vector.to_owned();
                             match &mut batch.vectors {
-                                BatchVectorStruct::Multi(batch_vectors) => {
-                                    batch_vectors.entry(name).or_default().push(vector)
-                                }
+                                BatchVectorStruct::Multi(batch_vectors) => batch_vectors
+                                    .entry(name)
+                                    .or_default()
+                                    .push(api::rest::Vector::from(vector)),
                                 _ => unreachable!(), // TODO(sparse) propagate error
                             }
                         }
@@ -489,12 +521,13 @@ impl PointStruct {
     pub fn get_vectors(&self) -> NamedVectors {
         let mut named_vectors = NamedVectors::default();
         match &self.vector {
-            VectorStruct::Single(vector) => {
-                named_vectors.insert(DEFAULT_VECTOR_NAME.to_string(), vector.clone().into())
-            }
+            VectorStruct::Single(vector) => named_vectors.insert(
+                DEFAULT_VECTOR_NAME.to_string(),
+                Vector::from(vector.clone()),
+            ),
             VectorStruct::Multi(vectors) => {
                 for (name, vector) in vectors {
-                    named_vectors.insert(name.clone(), vector.clone());
+                    named_vectors.insert(name.clone(), Vector::from(vector.clone()));
                 }
             }
         }
@@ -504,13 +537,15 @@ impl PointStruct {
 
 #[cfg(test)]
 mod tests {
+    use segment::data_types::vectors::BatchVectorStruct;
+
     use super::*;
 
     #[test]
     fn validate_batch() {
         let batch: PointInsertOperationsInternal = Batch {
             ids: vec![PointIdType::NumId(0)],
-            vectors: vec![].into(),
+            vectors: BatchVectorStruct::from(vec![]).into(),
             payloads: None,
         }
         .into();
@@ -518,7 +553,7 @@ mod tests {
 
         let batch: PointInsertOperationsInternal = Batch {
             ids: vec![PointIdType::NumId(0)],
-            vectors: vec![vec![0.1]].into(),
+            vectors: BatchVectorStruct::from(vec![vec![0.1]]).into(),
             payloads: None,
         }
         .into();
@@ -526,7 +561,7 @@ mod tests {
 
         let batch: PointInsertOperationsInternal = Batch {
             ids: vec![PointIdType::NumId(0)],
-            vectors: vec![vec![0.1]].into(),
+            vectors: BatchVectorStruct::from(vec![vec![0.1]]).into(),
             payloads: Some(vec![]),
         }
         .into();

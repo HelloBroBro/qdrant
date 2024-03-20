@@ -41,7 +41,7 @@ atomicwrites = "0.4.3"
 log = "0.4"
 env_logger = "0.11"
 merge = "0.1.0"
-async-trait = "0.1.77"
+async-trait = "0.1.78"
 arc-swap = "1.7.0"
 tonic = { workspace = true }
 uuid = { workspace = true }
@@ -59,7 +59,7 @@ api = { path = "../api" }
 
 itertools = "0.12"
 indicatif = "0.17.8"
-chrono = { version = "~0.4", features = ["serde"] }
+chrono = { workspace = true }
 schemars = { workspace = true }
 tar = "0.4.40"
 fs_extra = "1.3.0"
@@ -70,7 +70,7 @@ bytes = "1.5.0"
 fnv = { workspace = true }
 indexmap = { workspace = true }
 ringbuffer = "0.15.0"
-async-recursion = "1.0"
+async-recursion = "1.1"
 
 tracing = { workspace = true, optional = true }
 

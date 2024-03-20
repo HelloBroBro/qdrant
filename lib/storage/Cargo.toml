@@ -30,7 +30,7 @@ tonic = { workspace = true }
 http = "0.2"
 parking_lot = { workspace = true }
 tar = "0.4.40"
-chrono = { version = "~0.4", features = ["serde"] }
+chrono = { workspace = true }
 validator = { version = "0.16", features = ["derive"] }
 semver = { workspace = true }
 
@@ -45,15 +45,16 @@ common = { path = "../common/common" }
 cancel = { path = "../common/cancel" }
 io = { path = "../common/io" }
 memory = { path = "../common/memory" }
+rbac = { path = "../rbac" }
 segment = { path = "../segment" }
 collection = { path = "../collection" }
 api = { path = "../api" }
 futures = { workspace = true }
-anyhow = "1.0.80"
+anyhow = "1.0.81"
 uuid = { workspace = true }
 url = "2.5.0"
 reqwest = { version = "0.11", default-features = false, features = ["stream", "rustls-tls"] }
 tempfile = "3.10.1"
-async-recursion = "1.0"
+async-recursion = "1.1"
 
 tracing = { workspace = true, optional = true }
