@@ -1,5 +1,4 @@
 use std::num::NonZeroU32;
-use std::ops::Deref;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -8,6 +7,7 @@ use common::defaults::CONSENSUS_META_OP_WAIT;
 
 use crate::content_manager::collection_meta_ops::AliasOperations;
 use crate::content_manager::shard_distribution::ShardDistributionProposal;
+use crate::rbac::Access;
 use crate::{
     ClusterStatus, CollectionMetaOperations, ConsensusOperations, ConsensusStateRef, StorageError,
     TableOfContent,
@@ -34,7 +34,10 @@ impl Dispatcher {
         }
     }
 
-    pub fn toc(&self) -> &Arc<TableOfContent> {
+    /// Get the table of content.
+    /// The `_access` parameter is not used, but it's required to verify caller's possession
+    /// of the [Access] object.
+    pub fn toc(&self, _access: &Access) -> &Arc<TableOfContent> {
         &self.toc
     }
 
@@ -47,8 +50,11 @@ impl Dispatcher {
     pub async fn submit_collection_meta_op(
         &self,
         operation: CollectionMetaOperations,
+        access: Access,
         wait_timeout: Option<Duration>,
     ) -> Result<bool, StorageError> {
+        access.check_collection_meta_operation(&operation)?;
+
         // if distributed deployment is enabled
         if let Some(state) = self.consensus_state.as_ref() {
             let start = Instant::now();
@@ -207,13 +213,5 @@ impl Dispatcher {
         } else {
             Ok(())
         }
-    }
-}
-
-impl Deref for Dispatcher {
-    type Target = TableOfContent;
-
-    fn deref(&self) -> &Self::Target {
-        self.toc.deref()
     }
 }

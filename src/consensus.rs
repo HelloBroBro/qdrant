@@ -19,6 +19,8 @@ use prost::Message as _;
 use raft::eraftpb::Message as RaftMessage;
 use raft::prelude::*;
 use raft::{SoftState, StateRole, INVALID_ID};
+#[cfg(feature = "chaos-test")]
+use rand::Rng;
 use storage::content_manager::consensus_manager::ConsensusStateRef;
 use storage::content_manager::consensus_ops::{ConsensusOperations, SnapshotStatus};
 use storage::content_manager::toc::TableOfContent;
@@ -549,6 +551,14 @@ impl Consensus {
                         Ok(())
                     }
                     _ => {
+                        // For debug:
+                        // Drop message with 30% probability
+                        #[cfg(feature = "chaos-test")]
+                        if rand::thread_rng().gen_bool(0.3) {
+                            log::warn!("Dropping message with 30% probability: {:?}", &operation);
+                            return Ok(true);
+                        }
+
                         let message = match serde_cbor::to_vec(&operation) {
                             Ok(message) => message,
                             Err(err) => {
@@ -1134,11 +1144,10 @@ fn is_heartbeat(message: &RaftMessage) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use std::num::NonZeroU64;
     use std::sync::Arc;
     use std::thread;
 
-    use collection::operations::types::VectorParams;
+    use collection::operations::vector_params_builder::VectorParamsBuilder;
     use collection::shards::channel_service::ChannelService;
     use common::cpu::CpuBudget;
     use segment::types::Distance;
@@ -1151,6 +1160,7 @@ mod tests {
     use storage::content_manager::consensus_manager::{ConsensusManager, ConsensusStateRef};
     use storage::content_manager::toc::TableOfContent;
     use storage::dispatcher::Dispatcher;
+    use storage::rbac::Access;
     use tempfile::Builder;
 
     use super::Consensus;
@@ -1240,14 +1250,9 @@ mod tests {
                     CollectionMetaOperations::CreateCollection(CreateCollectionOperation::new(
                         "test".to_string(),
                         CreateCollection {
-                            vectors: VectorParams {
-                                size: NonZeroU64::new(10).unwrap(),
-                                distance: Distance::Cosine,
-                                hnsw_config: None,
-                                quantization_config: None,
-                                on_disk: None,
-                            }
-                            .into(),
+                            vectors: VectorParamsBuilder::new(10, Distance::Cosine)
+                                .build()
+                                .into(),
                             sparse_vectors: None,
                             hnsw_config: None,
                             wal_config: None,
@@ -1261,6 +1266,7 @@ mod tests {
                             sharding_method: None,
                         },
                     )),
+                    Access::full("For test"),
                     None,
                 ),
             )

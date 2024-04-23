@@ -28,6 +28,7 @@ def run_update_points_in_background(peer_url, collection_name, init_offset=0, th
     p.start()
     return p
 
+
 def check_data_consistency(data):
 
     assert(len(data) > 1)
@@ -39,8 +40,8 @@ def check_data_consistency(data):
         data_j = data[j]
 
         if data_i != data_j:
-            ids_i = set(x.id for x in data_i)
-            ids_j = set(x.id for x in data_j)
+            ids_i = set(x.id for x in data_i["points"])
+            ids_j = set(x.id for x in data_j["points"])
 
             diff = ids_i - ids_j
 
@@ -491,7 +492,7 @@ def test_shard_wal_delta_transfer_fallback(tmp_path: pathlib.Path):
     )
 
     # Insert some initial number of points
-    upsert_random_points(peer_api_uris[0], 100)
+    upsert_random_points(peer_api_uris[0], 2500)
 
     transfer_collection_cluster_info = get_collection_cluster_info(peer_api_uris[0], COLLECTION_NAME)
     receiver_collection_cluster_info = get_collection_cluster_info(peer_api_uris[2], COLLECTION_NAME)
@@ -503,7 +504,7 @@ def test_shard_wal_delta_transfer_fallback(tmp_path: pathlib.Path):
 
     # Transfer shard from one node to another
 
-    # Move shard `shard_id` to peer `target_peer_id`
+    # Replicate shard `shard_id` to peer `target_peer_id`
     r = requests.post(
         f"{peer_api_uris[0]}/collections/{COLLECTION_NAME}/cluster", json={
             "replicate_shard": {
@@ -515,14 +516,11 @@ def test_shard_wal_delta_transfer_fallback(tmp_path: pathlib.Path):
         })
     assert_http_ok(r)
 
-    # Wait for end of shard transfer
+    # WAL delta transfer should fail because the shard does not exist on the
+    # target node, assert we fall back to the streaming records method
+    # Then wait for the transfer to finish
+    wait_for_collection_shard_transfer_method(peer_api_uris[0], COLLECTION_NAME, "stream_records")
     wait_for_collection_shard_transfers_count(peer_api_uris[0], COLLECTION_NAME, 0)
-
-    # Assume that the WAL delta could not be resolved, preventing a diff
-    # transfer. 'Failed to do shard diff transfer, falling back to default
-    # method' is reported in the logs. But we cannot assert that at this point.
-    # It falls back to streaming records.
-    # TODO(1.9): assert 'streaming_records' transfer method in cluster state
 
     receiver_collection_cluster_info = get_collection_cluster_info(peer_api_uris[2], COLLECTION_NAME)
     number_local_shards = len(receiver_collection_cluster_info['local_shards'])

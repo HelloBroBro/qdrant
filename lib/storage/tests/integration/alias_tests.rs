@@ -1,7 +1,7 @@
-use std::num::{NonZeroU64, NonZeroUsize};
+use std::num::NonZeroUsize;
 use std::sync::Arc;
 
-use collection::operations::types::VectorParams;
+use collection::operations::vector_params_builder::VectorParamsBuilder;
 use collection::optimizers_builder::OptimizersConfig;
 use collection::shards::channel_service::ChannelService;
 use common::cpu::CpuBudget;
@@ -14,9 +14,12 @@ use storage::content_manager::collection_meta_ops::{
 use storage::content_manager::consensus::operation_sender::OperationSender;
 use storage::content_manager::toc::TableOfContent;
 use storage::dispatcher::Dispatcher;
+use storage::rbac::{Access, AccessRequirements};
 use storage::types::{PerformanceConfig, StorageConfig};
 use tempfile::Builder;
 use tokio::runtime::Runtime;
+
+const FULL_ACCESS: Access = Access::full("For test");
 
 #[test]
 fn test_alias_operation() {
@@ -94,14 +97,9 @@ fn test_alias_operation() {
                 CollectionMetaOperations::CreateCollection(CreateCollectionOperation::new(
                     "test".to_string(),
                     CreateCollection {
-                        vectors: VectorParams {
-                            size: NonZeroU64::new(10).unwrap(),
-                            distance: Distance::Cosine,
-                            hnsw_config: None,
-                            quantization_config: None,
-                            on_disk: None,
-                        }
-                        .into(),
+                        vectors: VectorParamsBuilder::new(10, Distance::Cosine)
+                            .build()
+                            .into(),
                         sparse_vectors: None,
                         hnsw_config: None,
                         wal_config: None,
@@ -115,6 +113,7 @@ fn test_alias_operation() {
                         sharding_method: None,
                     },
                 )),
+                FULL_ACCESS.clone(),
                 None,
             ),
         )
@@ -129,6 +128,7 @@ fn test_alias_operation() {
                     }
                     .into()],
             }),
+            FULL_ACCESS.clone(),
             None,
         ))
         .unwrap();
@@ -153,11 +153,18 @@ fn test_alias_operation() {
                         .into(),
                     ],
             }),
+            FULL_ACCESS.clone(),
             None,
         ))
         .unwrap();
 
     let _ = handle
-        .block_on(dispatcher.get_collection("test_alias3"))
+        .block_on(
+            dispatcher.toc(&FULL_ACCESS).get_collection(
+                &FULL_ACCESS
+                    .check_collection_access("test_alias3", AccessRequirements::new())
+                    .unwrap(),
+            ),
+        )
         .unwrap();
 }

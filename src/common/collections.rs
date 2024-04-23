@@ -1,3 +1,4 @@
+use std::sync::Arc;
 use std::time::Duration;
 
 use api::grpc::models::{CollectionDescription, CollectionsResponse};
@@ -25,14 +26,19 @@ use storage::content_manager::collection_meta_ops::{
 use storage::content_manager::errors::StorageError;
 use storage::content_manager::toc::TableOfContent;
 use storage::dispatcher::Dispatcher;
+use storage::rbac::{Access, AccessRequirements};
+use tokio::task::JoinHandle;
 
 pub async fn do_collection_exists(
     toc: &TableOfContent,
+    access: Access,
     name: &str,
 ) -> Result<CollectionExists, StorageError> {
+    let collection_pass = access.check_collection_access(name, AccessRequirements::new())?;
+
     // if this returns Ok, it means the collection exists.
     // if not, we check that the error is NotFound
-    let Err(error) = toc.get_collection(name).await else {
+    let Err(error) = toc.get_collection(&collection_pass).await else {
         return Ok(CollectionExists { exists: true });
     };
     match error {
@@ -43,10 +49,14 @@ pub async fn do_collection_exists(
 
 pub async fn do_get_collection(
     toc: &TableOfContent,
+    access: Access,
     name: &str,
     shard_selection: Option<ShardId>,
 ) -> Result<CollectionInfo, StorageError> {
-    let collection = toc.get_collection(name).await?;
+    let collection_pass =
+        access.check_collection_access(name, AccessRequirements::new().whole())?;
+
+    let collection = toc.get_collection(&collection_pass).await?;
 
     let shard_selection = match shard_selection {
         None => ShardSelectorInternal::All,
@@ -56,15 +66,20 @@ pub async fn do_get_collection(
     Ok(collection.info(&shard_selection).await?)
 }
 
-pub async fn do_list_collections(toc: &TableOfContent) -> CollectionsResponse {
+pub async fn do_list_collections(
+    toc: &TableOfContent,
+    access: Access,
+) -> Result<CollectionsResponse, StorageError> {
     let collections = toc
-        .all_collections()
+        .all_collections(&access)
         .await
         .into_iter()
-        .map(|name| CollectionDescription { name })
+        .map(|pass| CollectionDescription {
+            name: pass.name().to_string(),
+        })
         .collect_vec();
 
-    CollectionsResponse { collections }
+    Ok(CollectionsResponse { collections })
 }
 
 /// Construct shards-replicas layout for the shard from the given scope of peers
@@ -108,61 +123,66 @@ fn generate_even_placement(
 
 pub async fn do_list_collection_aliases(
     toc: &TableOfContent,
+    access: Access,
     collection_name: &str,
 ) -> Result<CollectionsAliasesResponse, StorageError> {
-    let mut aliases: Vec<AliasDescription> = Default::default();
-    for alias in toc.collection_aliases(collection_name).await?.into_iter() {
-        aliases.push(AliasDescription {
+    let collection_pass =
+        access.check_collection_access(collection_name, AccessRequirements::new())?;
+    let aliases: Vec<AliasDescription> = toc
+        .collection_aliases(&collection_pass, &access)
+        .await?
+        .into_iter()
+        .map(|alias| AliasDescription {
             alias_name: alias,
             collection_name: collection_name.to_string(),
-        });
-    }
+        })
+        .collect();
     Ok(CollectionsAliasesResponse { aliases })
 }
 
 pub async fn do_list_aliases(
     toc: &TableOfContent,
+    access: Access,
 ) -> Result<CollectionsAliasesResponse, StorageError> {
-    let aliases = toc.list_aliases().await?;
+    let aliases = toc.list_aliases(&access).await?;
     Ok(CollectionsAliasesResponse { aliases })
 }
 
 pub async fn do_list_snapshots(
     toc: &TableOfContent,
+    access: Access,
     collection_name: &str,
 ) -> Result<Vec<SnapshotDescription>, StorageError> {
+    let collection_pass =
+        access.check_collection_access(collection_name, AccessRequirements::new().whole())?;
     Ok(toc
-        .get_collection(collection_name)
+        .get_collection(&collection_pass)
         .await?
         .list_snapshots()
         .await?)
 }
 
-pub async fn do_create_snapshot(
-    dispatcher: &Dispatcher,
+pub fn do_create_snapshot(
+    toc: Arc<TableOfContent>,
+    access: Access,
     collection_name: &str,
-    wait: bool,
-) -> Result<SnapshotDescription, StorageError> {
-    let collection = collection_name.to_string();
-    let dispatcher = dispatcher.clone();
-    let snapshot = tokio::spawn(async move { dispatcher.create_snapshot(&collection).await });
-    if wait {
-        Ok(snapshot.await??)
-    } else {
-        Ok(SnapshotDescription {
-            name: "".to_string(),
-            creation_time: None,
-            size: 0,
-            checksum: None,
-        })
-    }
+) -> Result<JoinHandle<Result<SnapshotDescription, StorageError>>, StorageError> {
+    let collection_pass = access
+        .check_collection_access(collection_name, AccessRequirements::new().write().whole())?
+        .into_static();
+    Ok(tokio::spawn(async move {
+        toc.create_snapshot(&collection_pass).await
+    }))
 }
 
 pub async fn do_get_collection_cluster(
     toc: &TableOfContent,
+    access: Access,
     name: &str,
 ) -> Result<CollectionClusterInfo, StorageError> {
-    let collection = toc.get_collection(name).await?;
+    let collection_pass =
+        access.check_collection_access(name, AccessRequirements::new().whole())?;
+    let collection = toc.get_collection(&collection_pass).await?;
     Ok(collection.cluster_info(toc.this_peer_id).await?)
 }
 
@@ -170,8 +190,14 @@ pub async fn do_update_collection_cluster(
     dispatcher: &Dispatcher,
     collection_name: String,
     operation: ClusterOperations,
+    access: Access,
     wait_timeout: Option<Duration>,
 ) -> Result<bool, StorageError> {
+    let collection_pass = access.check_collection_access(
+        &collection_name,
+        AccessRequirements::new().write().manage().whole(),
+    )?;
+
     if dispatcher.consensus_state().is_none() {
         return Err(StorageError::BadRequest {
             description: "Distributed mode disabled".to_string(),
@@ -205,7 +231,10 @@ pub async fn do_update_collection_cluster(
         Ok(())
     };
 
-    let collection = dispatcher.get_collection(&collection_name).await?;
+    let collection = dispatcher
+        .toc(&access)
+        .get_collection(&collection_pass)
+        .await?;
 
     match operation {
         ClusterOperations::MoveShard(MoveShardOperation { move_shard }) => {
@@ -236,6 +265,7 @@ pub async fn do_update_collection_cluster(
                             method: move_shard.method,
                         }),
                     ),
+                    access,
                     wait_timeout,
                 )
                 .await
@@ -270,6 +300,7 @@ pub async fn do_update_collection_cluster(
                             method: replicate_shard.method,
                         }),
                     ),
+                    access,
                     wait_timeout,
                 )
                 .await
@@ -299,6 +330,7 @@ pub async fn do_update_collection_cluster(
                             reason: "user request".to_string(),
                         },
                     ),
+                    access,
                     wait_timeout,
                 )
                 .await
@@ -325,6 +357,7 @@ pub async fn do_update_collection_cluster(
             dispatcher
                 .submit_collection_meta_op(
                     CollectionMetaOperations::UpdateCollection(update_operation),
+                    access,
                     wait_timeout,
                 )
                 .await
@@ -397,6 +430,7 @@ pub async fn do_update_collection_cluster(
                         shard_key: create_sharding_key.shard_key,
                         placement: exact_placement,
                     }),
+                    access,
                     wait_timeout,
                 )
                 .await
@@ -434,6 +468,7 @@ pub async fn do_update_collection_cluster(
                         collection_name,
                         shard_key: drop_sharding_key.shard_key,
                     }),
+                    access,
                     wait_timeout,
                 )
                 .await
@@ -472,6 +507,7 @@ pub async fn do_update_collection_cluster(
                             method,
                         }),
                     ),
+                    access,
                     wait_timeout,
                 )
                 .await

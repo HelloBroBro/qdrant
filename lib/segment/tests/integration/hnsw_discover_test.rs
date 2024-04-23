@@ -77,6 +77,8 @@ fn hnsw_discover_precision() {
                 storage_type: VectorStorageType::Memory,
                 index: Indexes::Plain {},
                 quantization_config: None,
+                multi_vec_config: None,
+                datatype: None,
             },
         )]),
         payload_storage_type: Default::default(),
@@ -138,13 +140,14 @@ fn hnsw_discover_precision() {
                     ..Default::default()
                 }),
                 &false.into(),
+                usize::MAX,
             )
             .unwrap();
 
         let plain_discovery_result = segment.vector_data[DEFAULT_VECTOR_NAME]
             .vector_index
             .borrow()
-            .search(&[&query], None, top, None, &false.into())
+            .search(&[&query], None, top, None, &false.into(), usize::MAX)
             .unwrap();
 
         if plain_discovery_result == index_discovery_result {
@@ -187,6 +190,8 @@ fn filtered_hnsw_discover_precision() {
                 storage_type: VectorStorageType::Memory,
                 index: Indexes::Plain {},
                 quantization_config: None,
+                multi_vec_config: None,
+                datatype: None,
             },
         )]),
         payload_storage_type: Default::default(),
@@ -267,13 +272,21 @@ fn filtered_hnsw_discover_precision() {
                     ..Default::default()
                 }),
                 &false.into(),
+                usize::MAX,
             )
             .unwrap();
 
         let plain_discovery_result = segment.vector_data[DEFAULT_VECTOR_NAME]
             .vector_index
             .borrow()
-            .search(&[&query], filter_query, top, None, &false.into())
+            .search(
+                &[&query],
+                filter_query,
+                top,
+                None,
+                &false.into(),
+                usize::MAX,
+            )
             .unwrap();
 
         if plain_discovery_result == index_discovery_result {

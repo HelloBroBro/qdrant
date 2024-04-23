@@ -88,12 +88,19 @@ fn compare_sparse_vectors_search_with_without_filter(full_scan_threshold: usize)
         let query_vector: QueryVector = query.clone().into();
         // with filter
         let index_results_filter = sparse_vector_index
-            .search(&[&query_vector], Some(&filter), top, None, &stopped)
+            .search(
+                &[&query_vector],
+                Some(&filter),
+                top,
+                None,
+                &stopped,
+                usize::MAX,
+            )
             .unwrap();
 
         // without filter
         let index_results_no_filter = sparse_vector_index
-            .search(&[&query_vector], None, top, None, &stopped)
+            .search(&[&query_vector], None, top, None, &stopped, usize::MAX)
             .unwrap();
 
         assert_eq!(index_results_filter.len(), index_results_no_filter.len());
@@ -116,7 +123,12 @@ fn compare_sparse_vectors_search_with_without_filter(full_scan_threshold: usize)
                 .filter(|s| s.score != 0.0)
                 .zip(no_filter_result.iter().filter(|s| s.score != 0.0))
             {
-                assert_eq!(filter_result, no_filter_result);
+                if filter_result.idx != no_filter_result.idx {
+                    // we do not break ties when identical scores
+                    assert_eq!(filter_result.score, no_filter_result.score);
+                } else {
+                    assert_eq!(filter_result, no_filter_result);
+                }
             }
         }
     }
@@ -167,7 +179,7 @@ fn check_index_storage_consistency<T: InvertedIndex>(sparse_vector_index: &Spars
         let top = sparse_vector_index.max_result_count(vector);
         let query_vector: QueryVector = vector.to_owned().into();
         let results = sparse_vector_index
-            .search(&[&query_vector], None, top, None, &false.into())
+            .search(&[&query_vector], None, top, None, &false.into(), usize::MAX)
             .unwrap();
         assert!(results[0].iter().any(|s| s.idx == id));
     }
@@ -300,7 +312,7 @@ fn sparse_vector_index_ram_deleted_points_search() {
     // query index
     let query_vector: QueryVector = random_sparse_vector(&mut rnd, MAX_SPARSE_DIM).into();
     let before_deletion_results: Vec<_> = sparse_vector_index
-        .search(&[&query_vector], None, top, None, &stopped)
+        .search(&[&query_vector], None, top, None, &stopped, usize::MAX)
         .unwrap();
 
     // pick a point to delete
@@ -353,7 +365,7 @@ fn sparse_vector_index_ram_deleted_points_search() {
 
     // assert that the deleted point is no longer in the index
     let after_deletion_results: Vec<_> = sparse_vector_index
-        .search(&[&query_vector], None, top, None, &stopped)
+        .search(&[&query_vector], None, top, None, &stopped, usize::MAX)
         .unwrap();
     assert_ne!(before_deletion_results, after_deletion_results);
     assert!(after_deletion_results
@@ -389,7 +401,14 @@ fn sparse_vector_index_ram_filtered_search() {
     // query all sparse dimension to get all points
     let query_vector: QueryVector = random_full_sparse_vector(&mut rnd, MAX_SPARSE_DIM).into();
     let before_result = sparse_vector_index
-        .search(&[&query_vector], Some(&filter), 10, None, &stopped)
+        .search(
+            &[&query_vector],
+            Some(&filter),
+            10,
+            None,
+            &stopped,
+            usize::MAX,
+        )
         .unwrap();
     assert_eq!(before_result.len(), 1);
     assert_eq!(before_result[0].len(), 0);
@@ -443,6 +462,7 @@ fn sparse_vector_index_ram_filtered_search() {
             half_indexed_count * 2, // original top
             None,
             &stopped,
+            usize::MAX,
         )
         .unwrap();
     assert_eq!(after_result.len(), 1);
@@ -478,7 +498,14 @@ fn sparse_vector_index_plain_search() {
 
     // empty when searching payload index directly
     let before_plain_results = sparse_vector_index
-        .search(&[&query_vector], Some(&filter), 10, None, &stopped)
+        .search(
+            &[&query_vector],
+            Some(&filter),
+            10,
+            None,
+            &stopped,
+            usize::MAX,
+        )
         .unwrap();
 
     assert_eq!(before_plain_results.len(), 1);
@@ -500,7 +527,14 @@ fn sparse_vector_index_plain_search() {
 
     // same results when searching payload index directly
     let after_plain_results = sparse_vector_index
-        .search(&[&query_vector], Some(&filter), NUM_VECTORS, None, &stopped)
+        .search(
+            &[&query_vector],
+            Some(&filter),
+            NUM_VECTORS,
+            None,
+            &stopped,
+            usize::MAX,
+        )
         .unwrap();
 
     assert_eq!(after_plain_results.len(), 1);
@@ -561,7 +595,7 @@ fn handling_empty_sparse_vectors() {
 
     // empty vectors are not searchable (recommend using scroll API to retrieve those)
     let results = sparse_vector_index
-        .search(&[&query_vector], None, 10, None, &stopped)
+        .search(&[&query_vector], None, 10, None, &stopped, usize::MAX)
         .unwrap();
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].len(), 0);
@@ -619,7 +653,6 @@ fn sparse_vector_index_persistence_test() {
             None,
             top,
             None,
-            &stopped,
         )
         .unwrap();
 
@@ -640,7 +673,6 @@ fn sparse_vector_index_persistence_test() {
             None,
             top,
             None,
-            &stopped,
         )
         .unwrap();
 
@@ -691,7 +723,7 @@ fn sparse_vector_index_persistence_test() {
 
     // check that the loaded index performs the same search
     let search_after_reload_result = sparse_vector_index_ram
-        .search(&[&query_vector], None, top, None, &stopped)
+        .search(&[&query_vector], None, top, None, &stopped, usize::MAX)
         .unwrap();
     assert_eq!(search_after_reload_result[0].len(), top);
     for (search_1, search_2) in search_result
@@ -752,7 +784,7 @@ fn sparse_vector_index_persistence_test() {
 
     // check that the loaded index performs the same search
     let search_after_reload_result = sparse_vector_index_mmap
-        .search(&[&query_vector], None, top, None, &stopped)
+        .search(&[&query_vector], None, top, None, &stopped, usize::MAX)
         .unwrap();
     assert_eq!(search_after_reload_result[0].len(), top);
     for (search_1, search_2) in search_result

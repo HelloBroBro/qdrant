@@ -11,8 +11,8 @@ use segment::common::anonymize::Anonymize;
 use segment::data_types::vectors::DEFAULT_VECTOR_NAME;
 use segment::index::sparse_index::sparse_index_config::{SparseIndexConfig, SparseIndexType};
 use segment::types::{
-    Distance, HnswConfig, Indexes, QuantizationConfig, SparseVectorDataConfig, VectorDataConfig,
-    VectorStorageType,
+    Distance, HnswConfig, Indexes, PayloadStorageType, QuantizationConfig, SparseVectorDataConfig,
+    VectorDataConfig, VectorStorageDatatype, VectorStorageType,
 };
 use serde::{Deserialize, Serialize};
 use validator::Validate;
@@ -104,6 +104,16 @@ pub struct CollectionParams {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[validate]
     pub sparse_vectors: Option<BTreeMap<String, SparseVectorParams>>,
+}
+
+impl CollectionParams {
+    pub fn payload_storage_type(&self) -> PayloadStorageType {
+        if self.on_disk_payload {
+            PayloadStorageType::OnDisk
+        } else {
+            PayloadStorageType::InMemory
+        }
+    }
 }
 
 impl Anonymize for CollectionParams {
@@ -317,7 +327,7 @@ impl CollectionParams {
     ///
     /// It is the job of the segment optimizer to change this configuration with optimized settings
     /// based on threshold configurations.
-    pub fn into_base_vector_data(&self) -> CollectionResult<HashMap<String, VectorDataConfig>> {
+    pub fn to_base_vector_data(&self) -> CollectionResult<HashMap<String, VectorDataConfig>> {
         Ok(self
             .vectors
             .params_iter()
@@ -337,6 +347,9 @@ impl CollectionParams {
                         } else {
                             VectorStorageType::Memory
                         },
+                        // TODO(colbert) add `multivec` to `VectorParams`
+                        multi_vec_config: None,
+                        datatype: params.datatype.map(VectorStorageDatatype::from),
                     },
                 )
             })
@@ -347,7 +360,7 @@ impl CollectionParams {
     ///
     /// It is the job of the segment optimizer to change this configuration with optimized settings
     /// based on threshold configurations.
-    pub fn into_sparse_vector_data(
+    pub fn to_sparse_vector_data(
         &self,
     ) -> CollectionResult<HashMap<String, SparseVectorDataConfig>> {
         if let Some(sparse_vectors) = &self.sparse_vectors {

@@ -5,8 +5,16 @@ use semver::Version;
 
 use crate::cpu;
 
-/// Current Qdrant version
-pub const QDRANT_VERSION: Version = Version::new(1, 8, 4);
+/// Current Qdrant version string
+pub const QDRANT_VERSION_STRING: &str = "1.9.0";
+
+lazy_static! {
+    /// Current Qdrant semver version
+    pub static ref QDRANT_VERSION: Version = Version::parse(QDRANT_VERSION_STRING).expect("malformed version string");
+}
+
+/// Number of retries for confirming a consensus operation.
+pub const CONSENSUS_CONFIRM_RETRIES: usize = 3;
 
 /// Default timeout for consensus meta operations.
 pub const CONSENSUS_META_OP_WAIT: Duration = Duration::from_secs(10);

@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::slice::ChunksExactMut;
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -23,27 +24,7 @@ pub enum Vector {
 pub enum VectorRef<'a> {
     Dense(&'a [VectorElementType]),
     Sparse(&'a SparseVector),
-    MultiDense(&'a [DenseVector]),
-}
-
-impl Vector {
-    pub fn to_vec_ref(&self) -> VectorRef {
-        match self {
-            Vector::Dense(v) => VectorRef::Dense(v.as_slice()),
-            Vector::Sparse(v) => VectorRef::Sparse(v),
-            Vector::MultiDense(v) => VectorRef::MultiDense(v),
-        }
-    }
-}
-
-impl<'a> VectorRef<'a> {
-    pub fn to_vec(self) -> Vector {
-        match self {
-            VectorRef::Dense(v) => Vector::Dense(v.to_vec()),
-            VectorRef::Sparse(v) => Vector::Sparse(v.clone()),
-            VectorRef::MultiDense(v) => Vector::MultiDense(v.to_vec()),
-        }
-    }
+    MultiDense(&'a MultiDenseVector),
 }
 
 impl<'a> TryFrom<VectorRef<'a>> for &'a [VectorElementType] {
@@ -70,7 +51,7 @@ impl<'a> TryFrom<VectorRef<'a>> for &'a SparseVector {
     }
 }
 
-impl<'a> TryFrom<VectorRef<'a>> for &'a [DenseVector] {
+impl<'a> TryFrom<VectorRef<'a>> for &'a MultiDenseVector {
     type Error = OperationError;
 
     fn try_from(value: VectorRef<'a>) -> Result<Self, Self::Error> {
@@ -88,6 +69,7 @@ impl From<NamedVectorStruct> for Vector {
             NamedVectorStruct::Default(v) => Vector::Dense(v),
             NamedVectorStruct::Dense(v) => Vector::Dense(v.vector),
             NamedVectorStruct::Sparse(v) => Vector::Sparse(v.vector),
+            NamedVectorStruct::MultiDense(v) => Vector::MultiDense(v.vector),
         }
     }
 }
@@ -116,6 +98,18 @@ impl TryFrom<Vector> for SparseVector {
     }
 }
 
+impl TryFrom<Vector> for MultiDenseVector {
+    type Error = OperationError;
+
+    fn try_from(value: Vector) -> Result<Self, Self::Error> {
+        match value {
+            Vector::Dense(_) => Err(OperationError::WrongMulti),
+            Vector::Sparse(_) => Err(OperationError::WrongSparse),
+            Vector::MultiDense(v) => Ok(v),
+        }
+    }
+}
+
 impl<'a> From<&'a [VectorElementType]> for VectorRef<'a> {
     fn from(val: &'a [VectorElementType]) -> Self {
         VectorRef::Dense(val)
@@ -125,6 +119,12 @@ impl<'a> From<&'a [VectorElementType]> for VectorRef<'a> {
 impl<'a> From<&'a DenseVector> for VectorRef<'a> {
     fn from(val: &'a DenseVector) -> Self {
         VectorRef::Dense(val.as_slice())
+    }
+}
+
+impl<'a> From<&'a MultiDenseVector> for VectorRef<'a> {
+    fn from(val: &'a MultiDenseVector) -> Self {
+        VectorRef::MultiDense(val)
     }
 }
 
@@ -146,6 +146,12 @@ impl From<SparseVector> for Vector {
     }
 }
 
+impl From<MultiDenseVector> for Vector {
+    fn from(val: MultiDenseVector) -> Self {
+        Vector::MultiDense(val)
+    }
+}
+
 impl<'a> From<&'a Vector> for VectorRef<'a> {
     fn from(val: &'a Vector) -> Self {
         match val {
@@ -159,13 +165,83 @@ impl<'a> From<&'a Vector> for VectorRef<'a> {
 /// Type of vector element.
 pub type VectorElementType = f32;
 
+pub type VectorElementTypeByte = u8;
+
 pub const DEFAULT_VECTOR_NAME: &str = "";
 
+pub type TypedDenseVector<T> = Vec<T>;
+
 /// Type for dense vector
-pub type DenseVector = Vec<VectorElementType>;
+pub type DenseVector = TypedDenseVector<VectorElementType>;
 
 /// Type for multi dense vector
-pub type MultiDenseVector = Vec<DenseVector>;
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+pub struct MultiDenseVector {
+    pub inner_vector: DenseVector, // vectors are flattened into a single vector
+    pub dim: usize,                // dimension of each vector
+}
+
+impl MultiDenseVector {
+    pub fn new(flattened_vectors: DenseVector, dim: usize) -> Self {
+        Self {
+            inner_vector: flattened_vectors,
+            dim,
+        }
+    }
+
+    /// MultiDenseVector cannot be empty, so we use a placeholder vector instead
+    pub fn placeholder(dim: usize) -> Self {
+        Self {
+            inner_vector: vec![1.0; dim],
+            dim,
+        }
+    }
+
+    /// Slices the multi vector into the underlying individual vectors
+    pub fn multi_vectors(&self) -> impl Iterator<Item = &[VectorElementType]> {
+        self.inner_vector.chunks_exact(self.dim)
+    }
+
+    pub fn multi_vectors_mut(&mut self) -> ChunksExactMut<'_, VectorElementType> {
+        self.inner_vector.chunks_exact_mut(self.dim)
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.inner_vector.is_empty()
+    }
+}
+
+impl TryFrom<Vec<DenseVector>> for MultiDenseVector {
+    type Error = OperationError;
+
+    fn try_from(value: Vec<DenseVector>) -> Result<Self, Self::Error> {
+        if value.is_empty() {
+            return Err(OperationError::ValidationError {
+                description: "MultiDenseVector cannot be empty".to_string(),
+            });
+        }
+        let dim = value[0].len();
+        // assert all vectors have the same dimension
+        if let Some(bad_vec) = value.iter().find(|v| v.len() != dim) {
+            Err(OperationError::WrongVector {
+                expected_dim: dim,
+                received_dim: bad_vec.len(),
+            })
+        } else {
+            let inner_vector = value.into_iter().flatten().collect();
+            let multi_dense = MultiDenseVector { inner_vector, dim };
+            Ok(multi_dense)
+        }
+    }
+}
+
+impl TryFrom<Vec<DenseVector>> for Vector {
+    type Error = OperationError;
+
+    fn try_from(value: Vec<DenseVector>) -> Result<Self, Self::Error> {
+        MultiDenseVector::try_from(value).map(Vector::MultiDense)
+    }
+}
 
 impl<'a> VectorRef<'a> {
     // Cannot use `ToOwned` trait because of `Borrow` implementation for `Vector`
@@ -173,7 +249,7 @@ impl<'a> VectorRef<'a> {
         match self {
             VectorRef::Dense(v) => Vector::Dense(v.to_vec()),
             VectorRef::Sparse(v) => Vector::Sparse(v.clone()),
-            VectorRef::MultiDense(v) => Vector::MultiDense(v.to_vec()),
+            VectorRef::MultiDense(v) => Vector::MultiDense(v.clone()),
         }
     }
 }
@@ -202,12 +278,28 @@ impl<'a> TryInto<&'a SparseVector> for &'a Vector {
     }
 }
 
+impl<'a> TryInto<&'a MultiDenseVector> for &'a Vector {
+    type Error = OperationError;
+
+    fn try_into(self) -> Result<&'a MultiDenseVector, Self::Error> {
+        match self {
+            Vector::Dense(_) => Err(OperationError::WrongMulti),
+            Vector::Sparse(_) => Err(OperationError::WrongSparse),
+            Vector::MultiDense(v) => Ok(v),
+        }
+    }
+}
+
 pub fn default_vector(vec: DenseVector) -> NamedVectors<'static> {
     NamedVectors::from([(DEFAULT_VECTOR_NAME.to_owned(), vec)])
 }
 
 pub fn only_default_vector(vec: &[VectorElementType]) -> NamedVectors {
-    NamedVectors::from_ref(DEFAULT_VECTOR_NAME, vec.into())
+    NamedVectors::from_ref(DEFAULT_VECTOR_NAME, VectorRef::from(vec))
+}
+
+pub fn only_default_multi_vector(vec: &MultiDenseVector) -> NamedVectors {
+    NamedVectors::from_ref(DEFAULT_VECTOR_NAME, VectorRef::MultiDense(vec))
 }
 
 /// Full vector data per point separator with single and multiple vector modes
@@ -287,8 +379,8 @@ impl VectorStruct {
     }
 }
 
-/// Vector data with name
-#[derive(Debug, Deserialize, Serialize, JsonSchema, Clone)]
+/// Dense vector data with name
+#[derive(Debug, Deserialize, Serialize, JsonSchema, Clone, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub struct NamedVector {
     /// Name of vector data
@@ -297,8 +389,17 @@ pub struct NamedVector {
     pub vector: DenseVector,
 }
 
+/// MultiDense vector data with name
+#[derive(Debug, Clone, PartialEq)]
+pub struct NamedMultiDenseVector {
+    /// Name of vector data
+    pub name: String,
+    /// Vector data
+    pub vector: MultiDenseVector,
+}
+
 /// Sparse vector data with name
-#[derive(Debug, Deserialize, Serialize, JsonSchema, Clone, Validate)]
+#[derive(Debug, Deserialize, Serialize, JsonSchema, Clone, Validate, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub struct NamedSparseVector {
     /// Name of vector data
@@ -308,28 +409,12 @@ pub struct NamedSparseVector {
     pub vector: SparseVector,
 }
 
-/// Vector data separator for named and unnamed modes
-/// Unnamed mode:
-///
-/// {
-///   "vector": [1.0, 2.0, 3.0]
-/// }
-///
-/// or named mode:
-///
-/// {
-///   "vector": {
-///     "vector": [1.0, 2.0, 3.0],
-///     "name": "image-embeddings"
-///   }
-/// }
-#[derive(Debug, Deserialize, Serialize, JsonSchema, Clone)]
-#[serde(rename_all = "snake_case")]
-#[serde(untagged)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum NamedVectorStruct {
     Default(DenseVector),
     Dense(NamedVector),
     Sparse(NamedSparseVector),
+    MultiDense(NamedMultiDenseVector),
 }
 
 impl From<DenseVector> for NamedVectorStruct {
@@ -360,6 +445,7 @@ impl Named for NamedVectorStruct {
             NamedVectorStruct::Default(_) => DEFAULT_VECTOR_NAME,
             NamedVectorStruct::Dense(v) => &v.name,
             NamedVectorStruct::Sparse(v) => &v.name,
+            NamedVectorStruct::MultiDense(v) => &v.name,
         }
     }
 }
@@ -369,9 +455,8 @@ impl NamedVectorStruct {
         match vector {
             Vector::Dense(vector) => NamedVectorStruct::Dense(NamedVector { name, vector }),
             Vector::Sparse(vector) => NamedVectorStruct::Sparse(NamedSparseVector { name, vector }),
-            Vector::MultiDense(_) => {
-                // TODO(colbert)
-                unimplemented!("MultiDenseVector cannot be converted to NamedVectorStruct")
+            Vector::MultiDense(vector) => {
+                NamedVectorStruct::MultiDense(NamedMultiDenseVector { name, vector })
             }
         }
     }
@@ -381,6 +466,7 @@ impl NamedVectorStruct {
             NamedVectorStruct::Default(v) => v.as_slice().into(),
             NamedVectorStruct::Dense(v) => v.vector.as_slice().into(),
             NamedVectorStruct::Sparse(v) => (&v.vector).into(),
+            NamedVectorStruct::MultiDense(v) => (&v.vector).into(),
         }
     }
 
@@ -389,16 +475,7 @@ impl NamedVectorStruct {
             NamedVectorStruct::Default(v) => v.into(),
             NamedVectorStruct::Dense(v) => v.vector.into(),
             NamedVectorStruct::Sparse(v) => v.vector.into(),
-        }
-    }
-}
-
-impl Validate for NamedVectorStruct {
-    fn validate(&self) -> Result<(), validator::ValidationErrors> {
-        match self {
-            NamedVectorStruct::Default(_) => Ok(()),
-            NamedVectorStruct::Dense(_) => Ok(()),
-            NamedVectorStruct::Sparse(v) => v.validate(),
+            NamedVectorStruct::MultiDense(v) => v.vector.into(),
         }
     }
 }
@@ -430,7 +507,7 @@ impl BatchVectorStruct {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct NamedQuery<TQuery> {
     pub query: TQuery,
     pub using: Option<String>,
@@ -468,6 +545,12 @@ impl<'a> From<&'a [VectorElementType]> for QueryVector {
     }
 }
 
+impl<'a> From<&'a MultiDenseVector> for QueryVector {
+    fn from(vec: &'a MultiDenseVector) -> Self {
+        Self::Nearest(Vector::MultiDense(vec.clone()))
+    }
+}
+
 impl<const N: usize> From<[VectorElementType; N]> for QueryVector {
     fn from(vec: [VectorElementType; N]) -> Self {
         let vec: VectorRef = vec.as_slice().into();
@@ -477,7 +560,7 @@ impl<const N: usize> From<[VectorElementType; N]> for QueryVector {
 
 impl<'a> From<VectorRef<'a>> for QueryVector {
     fn from(vec: VectorRef<'a>) -> Self {
-        Self::Nearest(vec.to_vec())
+        Self::Nearest(vec.to_owned())
     }
 }
 
@@ -490,6 +573,12 @@ impl From<Vector> for QueryVector {
 impl From<SparseVector> for QueryVector {
     fn from(vec: SparseVector) -> Self {
         Self::Nearest(Vector::Sparse(vec))
+    }
+}
+
+impl From<MultiDenseVector> for QueryVector {
+    fn from(vec: MultiDenseVector) -> Self {
+        Self::Nearest(Vector::MultiDense(vec))
     }
 }
 

@@ -5,8 +5,10 @@ pub mod mmap_type;
 pub mod operation_error;
 pub mod operation_time_statistics;
 pub mod rocksdb_buffered_delete_wrapper;
+pub mod rocksdb_buffered_update_wrapper;
 pub mod rocksdb_wrapper;
 pub mod utils;
+pub mod validate_snapshot_archive;
 pub mod vector_utils;
 pub mod version;
 
@@ -54,19 +56,19 @@ fn check_query_vector(
 ) -> OperationResult<()> {
     match query_vector {
         QueryVector::Nearest(vector) => {
-            check_vector_against_config(vector.to_vec_ref(), vector_config)?
+            check_vector_against_config(VectorRef::from(vector), vector_config)?
         }
         QueryVector::Recommend(reco_query) => reco_query.flat_iter().try_for_each(|vector| {
-            check_vector_against_config(vector.to_vec_ref(), vector_config)
+            check_vector_against_config(VectorRef::from(vector), vector_config)
         })?,
         QueryVector::Discovery(discovery_query) => {
             discovery_query.flat_iter().try_for_each(|vector| {
-                check_vector_against_config(vector.to_vec_ref(), vector_config)
+                check_vector_against_config(VectorRef::from(vector), vector_config)
             })?
         }
         QueryVector::Context(discovery_context_query) => {
             discovery_context_query.flat_iter().try_for_each(|vector| {
-                check_vector_against_config(vector.to_vec_ref(), vector_config)
+                check_vector_against_config(VectorRef::from(vector), vector_config)
             })?
         }
     }
@@ -80,19 +82,19 @@ fn check_query_sparse_vector(
 ) -> OperationResult<()> {
     match query_vector {
         QueryVector::Nearest(vector) => {
-            check_sparse_vector_against_config(vector.to_vec_ref(), vector_config)?
+            check_sparse_vector_against_config(VectorRef::from(vector), vector_config)?
         }
         QueryVector::Recommend(reco_query) => reco_query.flat_iter().try_for_each(|vector| {
-            check_sparse_vector_against_config(vector.to_vec_ref(), vector_config)
+            check_sparse_vector_against_config(VectorRef::from(vector), vector_config)
         })?,
         QueryVector::Discovery(discovery_query) => {
             discovery_query.flat_iter().try_for_each(|vector| {
-                check_sparse_vector_against_config(vector.to_vec_ref(), vector_config)
+                check_sparse_vector_against_config(VectorRef::from(vector), vector_config)
             })?
         }
         QueryVector::Context(discovery_context_query) => {
             discovery_context_query.flat_iter().try_for_each(|vector| {
-                check_sparse_vector_against_config(vector.to_vec_ref(), vector_config)
+                check_sparse_vector_against_config(VectorRef::from(vector), vector_config)
             })?
         }
     }
@@ -185,7 +187,19 @@ fn check_vector_against_config(
             Ok(())
         }
         VectorRef::Sparse(_) => Err(OperationError::WrongSparse),
-        VectorRef::MultiDense(_) => Err(OperationError::WrongMulti),
+        VectorRef::MultiDense(multi_vector) => {
+            // Check dimensionality
+            let dim = vector_config.size;
+            for vector in multi_vector.multi_vectors() {
+                if vector.len() != dim {
+                    return Err(OperationError::WrongVector {
+                        expected_dim: dim,
+                        received_dim: vector.len(),
+                    });
+                }
+            }
+            Ok(())
+        }
     }
 }
 

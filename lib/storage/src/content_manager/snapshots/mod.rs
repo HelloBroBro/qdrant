@@ -9,9 +9,11 @@ use serde::{Deserialize, Serialize};
 use tar::Builder as TarBuilder;
 use tempfile::TempPath;
 use tokio::io::AsyncWriteExt;
+use tokio::task::JoinHandle;
 
 use crate::content_manager::toc::FULL_SNAPSHOT_FILE_NAME;
 use crate::dispatcher::Dispatcher;
+use crate::rbac::{Access, AccessRequirements};
 use crate::{StorageError, TableOfContent};
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -54,77 +56,71 @@ pub async fn get_full_snapshot_path(
 
 pub async fn do_delete_full_snapshot(
     dispatcher: &Dispatcher,
+    access: Access,
     snapshot_name: &str,
-    wait: bool,
-) -> Result<bool, StorageError> {
-    let dispatcher = dispatcher.clone();
-    let snapshot_manager = dispatcher.clone().toc().get_snapshots_storage_manager();
-    let snapshot_dir = get_full_snapshot_path(dispatcher.toc(), snapshot_name).await?;
+) -> Result<JoinHandle<Result<bool, StorageError>>, StorageError> {
+    access.check_global_access(AccessRequirements::new().manage())?;
+    let toc = dispatcher.toc(&access);
+    let snapshot_manager = toc.get_snapshots_storage_manager();
+    let snapshot_dir = get_full_snapshot_path(toc, snapshot_name).await?;
     log::info!("Deleting full storage snapshot {:?}", snapshot_dir);
-    let task = tokio::spawn(async move { snapshot_manager.delete_snapshot(&snapshot_dir).await });
-
-    if wait {
-        task.await??;
-    }
-
-    Ok(true)
+    Ok(tokio::spawn(async move {
+        Ok(snapshot_manager.delete_snapshot(&snapshot_dir).await?)
+    }))
 }
 
 pub async fn do_delete_collection_snapshot(
     dispatcher: &Dispatcher,
+    access: Access,
     collection_name: &str,
     snapshot_name: &str,
-    wait: bool,
-) -> Result<bool, StorageError> {
-    let collection_name = collection_name.to_string();
+) -> Result<JoinHandle<Result<bool, StorageError>>, StorageError> {
+    let collection_pass = access
+        .check_collection_access(collection_name, AccessRequirements::new().write().whole())?;
+    let toc = dispatcher.toc(&access);
     let snapshot_name = snapshot_name.to_string();
-    let collection = dispatcher.get_collection(&collection_name).await?;
+    let collection = toc.get_collection(&collection_pass).await?;
     let file_name = collection.get_snapshot_path(&snapshot_name).await?;
-    let snapshot_manager = dispatcher.clone().toc().get_snapshots_storage_manager();
+    let snapshot_manager = toc.get_snapshots_storage_manager();
 
     log::info!("Deleting collection snapshot {:?}", file_name);
-    let task = tokio::spawn(async move { snapshot_manager.delete_snapshot(&file_name).await });
-
-    if wait {
-        task.await??;
-    }
-
-    Ok(true)
+    Ok(tokio::spawn(async move {
+        Ok(snapshot_manager.delete_snapshot(&file_name).await?)
+    }))
 }
 
 pub async fn do_list_full_snapshots(
     toc: &TableOfContent,
+    access: Access,
 ) -> Result<Vec<SnapshotDescription>, StorageError> {
+    access.check_global_access(AccessRequirements::new())?;
     let snapshots_manager = toc.get_snapshots_storage_manager();
     let snapshots_path = Path::new(toc.snapshots_path());
     Ok(snapshots_manager.list_snapshots(snapshots_path).await?)
 }
 
-pub async fn do_create_full_snapshot(
+pub fn do_create_full_snapshot(
     dispatcher: &Dispatcher,
-    wait: bool,
-) -> Result<Option<SnapshotDescription>, StorageError> {
-    let dispatcher = dispatcher.clone();
-    let task = tokio::spawn(async move { _do_create_full_snapshot(&dispatcher).await });
-    if wait {
-        Ok(Some(task.await??))
-    } else {
-        Ok(None)
-    }
+    access: Access,
+) -> Result<JoinHandle<Result<SnapshotDescription, StorageError>>, StorageError> {
+    access.check_global_access(AccessRequirements::new().manage())?;
+    let toc = dispatcher.toc(&access).clone();
+    Ok(tokio::spawn(async move {
+        _do_create_full_snapshot(&toc, access).await
+    }))
 }
 
 async fn _do_create_full_snapshot(
-    dispatcher: &Dispatcher,
+    toc: &TableOfContent,
+    access: Access,
 ) -> Result<SnapshotDescription, StorageError> {
-    let dispatcher = dispatcher.clone();
+    let snapshot_dir = Path::new(toc.snapshots_path()).to_path_buf();
 
-    let snapshot_dir = Path::new(dispatcher.snapshots_path()).to_path_buf();
-
-    let all_collections = dispatcher.all_collections().await;
+    let all_collections = toc.all_collections(&access).await;
     let mut created_snapshots: Vec<(&str, SnapshotDescription)> = vec![];
-    for collection_name in &all_collections {
-        let snapshot_details = dispatcher.create_snapshot(collection_name).await?;
-        created_snapshots.push((collection_name, snapshot_details));
+    for collection_pass in &all_collections {
+        let snapshot_details = toc.create_snapshot(collection_pass).await?;
+        created_snapshots.push((collection_pass.name(), snapshot_details));
     }
     let current_time = chrono::Utc::now().format("%Y-%m-%d-%H-%M-%S").to_string();
 
@@ -138,9 +134,9 @@ async fn _do_create_full_snapshot(
         .collect();
 
     let mut alias_mapping: HashMap<String, String> = Default::default();
-    for collection_name in &all_collections {
-        for alias in dispatcher.collection_aliases(collection_name).await? {
-            alias_mapping.insert(alias.to_string(), collection_name.to_string());
+    for collection_pass in &all_collections {
+        for alias in toc.collection_aliases(collection_pass, &access).await? {
+            alias_mapping.insert(alias.to_string(), collection_pass.name().to_string());
         }
     }
 
@@ -163,7 +159,7 @@ async fn _do_create_full_snapshot(
 
     let full_snapshot_path = snapshot_dir.join(&snapshot_name);
 
-    let temp_full_snapshot_path = dispatcher
+    let temp_full_snapshot_path = toc
         .optional_temp_or_storage_temp_path()?
         .join(&snapshot_name);
 
@@ -175,8 +171,8 @@ async fn _do_create_full_snapshot(
     // (tempfile_with_snapshot, snapshot_name)
     let mut temp_collection_snapshots = vec![];
 
-    let temp_storage_path = dispatcher.optional_temp_or_storage_temp_path()?;
-    let snapshot_manager = dispatcher.toc().get_snapshots_storage_manager();
+    let temp_storage_path = toc.optional_temp_or_storage_temp_path()?;
+    let snapshot_manager = toc.get_snapshots_storage_manager();
 
     for (collection_name, snapshot_details) in &created_snapshots {
         let snapshot_path = snapshot_dir

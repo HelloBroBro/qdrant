@@ -25,11 +25,12 @@ use crate::common::operation_error::{OperationError, OperationResult};
 use crate::common::utils::{self, MultiValue};
 use crate::data_types::integer_index::IntegerIndexParams;
 use crate::data_types::text_index::TextIndexParams;
-use crate::data_types::vectors::{DenseVector, VectorElementType, VectorStruct};
+use crate::data_types::vectors::{VectorElementType, VectorStruct};
 use crate::index::sparse_index::sparse_index_config::{SparseIndexConfig, SparseIndexType};
 use crate::json_path::{JsonPath, JsonPathInterface};
-use crate::spaces::metric::Metric;
+use crate::spaces::metric::MetricPostProcessing;
 use crate::spaces::simple::{CosineMetric, DotProductMetric, EuclidMetric, ManhattanMetric};
+use crate::types::MultiVectorConfig::MaxSim;
 use crate::vector_storage::simple_sparse_vector_storage::SPARSE_VECTOR_DISTANCE;
 
 pub type PayloadKeyType = JsonPath;
@@ -165,15 +166,6 @@ pub enum Distance {
 }
 
 impl Distance {
-    pub fn preprocess_vector(&self, vector: DenseVector) -> DenseVector {
-        match self {
-            Distance::Cosine => CosineMetric::preprocess(vector),
-            Distance::Euclid => EuclidMetric::preprocess(vector),
-            Distance::Dot => DotProductMetric::preprocess(vector),
-            Distance::Manhattan => ManhattanMetric::preprocess(vector),
-        }
-    }
-
     pub fn postprocess_score(&self, score: ScoreType) -> ScoreType {
         match self {
             Distance::Cosine => CosineMetric::postprocess(score),
@@ -195,18 +187,6 @@ impl Distance {
         match self.distance_order() {
             Order::LargeBetter => score > threshold,
             Order::SmallBetter => score < threshold,
-        }
-    }
-
-    /// Calculates distance between two vectors
-    ///
-    /// Warn: prefer compile-time generics with `Metric` trait
-    pub fn similarity(&self, v1: &[VectorElementType], v2: &[VectorElementType]) -> ScoreType {
-        match self {
-            Distance::Cosine => CosineMetric::similarity(v1, v2),
-            Distance::Euclid => EuclidMetric::similarity(v1, v2),
-            Distance::Dot => DotProductMetric::similarity(v1, v2),
-            Distance::Manhattan => ManhattanMetric::similarity(v1, v2),
         }
     }
 }
@@ -747,6 +727,31 @@ pub enum VectorStorageType {
     ChunkedMmap,
 }
 
+/// Storage types for vectors
+#[derive(Default, Debug, Deserialize, Serialize, JsonSchema, Eq, PartialEq, Copy, Clone)]
+#[serde(rename_all = "snake_case")]
+pub enum VectorStorageDatatype {
+    // Single-precision floating point
+    #[default]
+    Float32,
+    // Unsigned 8-bit integer
+    Uint8,
+}
+
+#[derive(Debug, Deserialize, Serialize, JsonSchema, Eq, PartialEq, Copy, Clone)]
+pub enum MultiVectorConfig {
+    MaxSim(MaxSimConfig),
+}
+
+impl Default for MultiVectorConfig {
+    fn default() -> Self {
+        MaxSim(MaxSimConfig::default())
+    }
+}
+
+#[derive(Debug, Default, Deserialize, Serialize, JsonSchema, Eq, PartialEq, Copy, Clone)]
+pub struct MaxSimConfig {}
+
 impl VectorStorageType {
     /// Whether this storage type is a mmap on disk
     pub fn is_on_disk(&self) -> bool {
@@ -771,6 +776,12 @@ pub struct VectorDataConfig {
     pub index: Indexes,
     /// Vector specific quantization config that overrides collection config
     pub quantization_config: Option<QuantizationConfig>,
+    /// Vector specific configuration to enable multiple vectors per point
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub multi_vec_config: Option<MultiVectorConfig>,
+    /// Vector specific configuration to set specific storage element type
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub datatype: Option<VectorStorageDatatype>,
 }
 
 impl VectorDataConfig {
@@ -1191,6 +1202,16 @@ pub enum ValueVariants {
     Keyword(String),
     Integer(IntPayloadType),
     Bool(bool),
+}
+
+impl ValueVariants {
+    pub fn to_value(&self) -> Value {
+        match self {
+            ValueVariants::Keyword(keyword) => Value::String(keyword.clone()),
+            &ValueVariants::Integer(integer) => Value::Number(integer.into()),
+            &ValueVariants::Bool(flag) => Value::Bool(flag),
+        }
+    }
 }
 
 #[derive(Debug, Deserialize, Serialize, JsonSchema, Clone, PartialEq, Eq)]
@@ -1877,7 +1898,7 @@ impl Validate for Condition {
 }
 
 /// Options for specifying which payload to include or not
-#[derive(Debug, Deserialize, Serialize, JsonSchema, Clone)]
+#[derive(Debug, Deserialize, Serialize, JsonSchema, Clone, PartialEq)]
 #[serde(untagged, rename_all = "snake_case")]
 pub enum WithPayloadInterface {
     /// If `true` - return all payload,

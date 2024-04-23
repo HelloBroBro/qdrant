@@ -293,15 +293,22 @@ impl RecoveryPoint {
     }
 
     /// Remove a clock referenced by the clock tag from this recovery point, if the clock is
-    /// *newer or equal* than the tick in the tag.
-    pub fn remove_clock_if_newer_than_or_equal_to_tag(&mut self, tag: ClockTag) {
+    /// *newer or equal* to the tick in the tag.
+    ///
+    /// Returns `true` if removed clock was *equal* to the tick in the tag, or `false` otherwise.
+    pub fn remove_clock_if_newer_or_equal_to_tag(&mut self, tag: ClockTag) -> bool {
         let key = Key::from_tag(tag);
+
+        let mut is_equal = false;
 
         if let Some(&(tick, _)) = self.clocks.get(&key) {
             if tick >= tag.clock_tick {
                 self.clocks.remove(&key);
+                is_equal = tick == tag.clock_tick;
             }
         }
+
+        is_equal
     }
 
     #[cfg(test)]

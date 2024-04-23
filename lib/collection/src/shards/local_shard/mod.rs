@@ -36,7 +36,9 @@ use wal::{Wal, WalOptions};
 use self::clock_map::{ClockMap, RecoveryPoint};
 use super::update_tracker::UpdateTracker;
 use crate::collection_manager::collection_updater::CollectionUpdater;
-use crate::collection_manager::holders::segment_holder::{LockedSegment, SegmentHolder};
+use crate::collection_manager::holders::segment_holder::{
+    LockedSegment, LockedSegmentHolder, SegmentHolder,
+};
 use crate::collection_manager::optimizers::TrackerLog;
 use crate::common::file_utils::{move_dir, move_file};
 use crate::config::CollectionConfig;
@@ -64,7 +66,7 @@ const WAL_LOAD_REPORT_EVERY: Duration = Duration::from_secs(60);
 ///
 /// Holds all object, required for collection functioning
 pub struct LocalShard {
-    pub(super) segments: Arc<RwLock<SegmentHolder>>,
+    pub(super) segments: LockedSegmentHolder,
     pub(super) collection_config: Arc<TokioRwLock<CollectionConfig>>,
     pub(super) shared_storage_config: Arc<SharedStorageConfig>,
     pub(super) wal: RecoverableWal,
@@ -210,12 +212,18 @@ impl LocalShard {
 
         let mut load_handlers = vec![];
 
+        // This semaphore is used to limit the number of threads that load segments concurrently.
+        // Uncomment it if you need to debug segment loading.
+        // let semaphore = Arc::new(parking_lot::Mutex::new(()));
+
         for entry in segment_dirs {
             let segments_path = entry.unwrap().path();
+            // let semaphore_clone = semaphore.clone();
             load_handlers.push(
                 thread::Builder::new()
                     .name(format!("shard-load-{collection_id}-{id}"))
                     .spawn(move || {
+                        // let _guard = semaphore_clone.lock();
                         let mut res = load_segment(&segments_path, &AtomicBool::new(false))?;
                         if let Some(segment) = &mut res {
                             segment.check_consistency_and_repair()?;
@@ -285,7 +293,7 @@ impl LocalShard {
 
         let clocks = LocalShardClocks::load(shard_path)?;
 
-        let collection = LocalShard::new(
+        let local_shard = LocalShard::new(
             segment_holder,
             collection_config,
             shared_storage_config,
@@ -298,10 +306,10 @@ impl LocalShard {
         )
         .await;
 
-        collection.load_from_wal(collection_id).await?;
+        local_shard.load_from_wal(collection_id).await?;
 
         let available_memory_bytes = Mem::new().available_memory_bytes() as usize;
-        let vectors_size_bytes = collection.estimate_vector_data_size().await;
+        let vectors_size_bytes = local_shard.estimate_vector_data_size().await;
 
         // Simple heuristic to exclude mmap prefaulting for collections that won't benefit from it.
         //
@@ -314,14 +322,14 @@ impl LocalShard {
         let do_mmap_prefault = available_memory_bytes * 2 > vectors_size_bytes;
 
         if do_mmap_prefault {
-            for (_, segment) in collection.segments.read().iter() {
+            for (_, segment) in local_shard.segments.read().iter() {
                 if let LockedSegment::Original(segment) = segment {
                     segment.read().prefault_mmap_pages();
                 }
             }
         }
 
-        Ok(collection)
+        Ok(local_shard)
     }
 
     pub fn shard_path(&self) -> PathBuf {
@@ -392,8 +400,8 @@ impl LocalShard {
         let mut segment_holder = SegmentHolder::default();
         let mut build_handlers = vec![];
 
-        let vector_params = config.params.into_base_vector_data()?;
-        let sparse_vector_params = config.params.into_sparse_vector_data()?;
+        let vector_params = config.params.to_base_vector_data()?;
+        let sparse_vector_params = config.params.to_sparse_vector_data()?;
         let segment_number = config.optimizer_config.get_number_segments();
 
         for _sid in 0..segment_number {
@@ -657,13 +665,21 @@ impl LocalShard {
             rx.await?;
         }
 
+        let collection_path = self.path.parent().map(Path::to_path_buf).ok_or_else(|| {
+            CollectionError::service_error("Failed to determine collection path for shard")
+        })?;
+        let collection_params = self.collection_config.read().await.params.clone();
         let temp_path = temp_path.to_owned();
 
         tokio::task::spawn_blocking(move || {
-            let segments_read = segments.read();
-
             // Do not change segments while snapshotting
-            segments_read.snapshot_all_segments(&temp_path, &snapshot_segments_shard_path)?;
+            SegmentHolder::snapshot_all_segments(
+                segments.clone(),
+                &collection_path,
+                Some(&collection_params),
+                &temp_path,
+                &snapshot_segments_shard_path,
+            )?;
 
             if save_wal {
                 // snapshot all shard's WAL
@@ -846,39 +862,55 @@ impl LocalShard {
 
     pub async fn local_shard_info(&self) -> CollectionInfoInternal {
         let collection_config = self.collection_config.read().await.clone();
-        let segments = self.segments().read();
         let mut vectors_count = 0;
         let mut indexed_vectors_count = 0;
         let mut points_count = 0;
         let mut segments_count = 0;
         let mut status = CollectionStatus::Green;
         let mut schema: HashMap<PayloadKeyType, PayloadIndexInfo> = Default::default();
-        for (_idx, segment) in segments.iter() {
-            segments_count += 1;
+        let mut optimizer_status = OptimizersStatus::Ok;
 
-            let segment_info = segment.get().read().info();
+        {
+            let segments = self.segments().read();
+            for (_idx, segment) in segments.iter() {
+                segments_count += 1;
 
-            if segment_info.segment_type == SegmentType::Special {
-                status = CollectionStatus::Yellow;
+                let segment_info = segment.get().read().info();
+
+                if segment_info.segment_type == SegmentType::Special {
+                    status = CollectionStatus::Yellow;
+                }
+                vectors_count += segment_info.num_vectors;
+                indexed_vectors_count += segment_info.num_indexed_vectors;
+                points_count += segment_info.num_points;
+                for (key, val) in segment_info.index_schema {
+                    schema
+                        .entry(key)
+                        .and_modify(|entry| entry.points += val.points)
+                        .or_insert(val);
+                }
             }
-            vectors_count += segment_info.num_vectors;
-            indexed_vectors_count += segment_info.num_indexed_vectors;
-            points_count += segment_info.num_points;
-            for (key, val) in segment_info.index_schema {
-                schema
-                    .entry(key)
-                    .and_modify(|entry| entry.points += val.points)
-                    .or_insert(val);
+            if !segments.failed_operation.is_empty() || segments.optimizer_errors.is_some() {
+                status = CollectionStatus::Red;
+            }
+
+            if let Some(error) = &segments.optimizer_errors {
+                optimizer_status = OptimizersStatus::Error(error.to_string());
             }
         }
-        if !segments.failed_operation.is_empty() || segments.optimizer_errors.is_some() {
-            status = CollectionStatus::Red;
-        }
 
-        let optimizer_status = match &segments.optimizer_errors {
-            None => OptimizersStatus::Ok,
-            Some(error) => OptimizersStatus::Error(error.to_string()),
-        };
+        // If still green while optimization conditions are triggered, mark as grey
+        if status == CollectionStatus::Green
+            && self.update_handler.lock().await.has_pending_optimizations()
+        {
+            // TODO(1.10): enable grey status in Qdrant 1.10+
+            // status = CollectionStatus::Grey;
+            if optimizer_status == OptimizersStatus::Ok {
+                optimizer_status = OptimizersStatus::Error(
+                    "optimizations pending, awaiting update operation".into(),
+                );
+            }
+        }
 
         CollectionInfoInternal {
             status,

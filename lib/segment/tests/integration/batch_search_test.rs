@@ -43,6 +43,8 @@ fn test_batch_and_single_request_equivalency() {
                 storage_type: VectorStorageType::Memory,
                 index: Indexes::Plain {},
                 quantization_config: None,
+                multi_vec_config: None,
+                datatype: None,
             },
         )]),
         sparse_vector_data: Default::default(),
@@ -92,7 +94,6 @@ fn test_batch_and_single_request_equivalency() {
                 Some(&filter),
                 10,
                 None,
-                &false.into(),
             )
             .unwrap();
 
@@ -105,7 +106,6 @@ fn test_batch_and_single_request_equivalency() {
                 Some(&filter),
                 10,
                 None,
-                &false.into(),
             )
             .unwrap();
 
@@ -119,6 +119,7 @@ fn test_batch_and_single_request_equivalency() {
                 10,
                 None,
                 &false.into(),
+                10_000,
             )
             .unwrap();
 
@@ -174,11 +175,25 @@ fn test_batch_and_single_request_equivalency() {
         )));
 
         let search_res_1 = hnsw_index
-            .search(&[&query_vector_1], Some(&filter), 10, None, &false.into())
+            .search(
+                &[&query_vector_1],
+                Some(&filter),
+                10,
+                None,
+                &false.into(),
+                usize::MAX,
+            )
             .unwrap();
 
         let search_res_2 = hnsw_index
-            .search(&[&query_vector_2], Some(&filter), 10, None, &false.into())
+            .search(
+                &[&query_vector_2],
+                Some(&filter),
+                10,
+                None,
+                &false.into(),
+                usize::MAX,
+            )
             .unwrap();
 
         let batch_res = hnsw_index
@@ -188,6 +203,7 @@ fn test_batch_and_single_request_equivalency() {
                 10,
                 None,
                 &false.into(),
+                usize::MAX,
             )
             .unwrap();
 

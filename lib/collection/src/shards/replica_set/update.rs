@@ -45,7 +45,6 @@ impl ShardReplicaSet {
                     Ok(Some(local_shard.get().update(operation, false).await?))
                 }
                 // In recovery state, only allow operations with force flag
-                // TODO(1.9): deprecate accepting partialsnapshot operations if force is true
                 Some(ReplicaState::PartialSnapshot | ReplicaState::Recovery)
                     if operation.clock_tag.map_or(false, |tag| tag.force) =>
                 {
@@ -420,11 +419,9 @@ impl ShardReplicaSet {
 
         for (peer_id, err) in failures {
             log::warn!(
-                "Failed to update shard {}:{} on peer {}, error: {}",
+                "Failed to update shard {}:{} on peer {peer_id}, error: {err}",
                 self.collection_id,
                 self.shard_id,
-                peer_id,
-                err
             );
 
             let Some(&peer_state) = state.get_peer_state(peer_id) else {
@@ -432,6 +429,14 @@ impl ShardReplicaSet {
             };
 
             if peer_state != ReplicaState::Active && peer_state != ReplicaState::Initializing {
+                continue;
+            }
+
+            if peer_state == ReplicaState::Partial
+                && matches!(err, CollectionError::PreConditionFailed { .. })
+            {
+                // Handles a special case where transfer receiver haven't created a shard yet.
+                // In this case update should be handled by source shard and forward proxy.
                 continue;
             }
 
@@ -444,8 +449,7 @@ impl ShardReplicaSet {
             }
 
             log::debug!(
-                "Deactivating peer {} because of failed update of shard {}:{}",
-                peer_id,
+                "Deactivating peer {peer_id} because of failed update of shard {}:{}",
                 self.collection_id,
                 self.shard_id
             );
@@ -488,7 +492,7 @@ impl ShardReplicaSet {
 #[cfg(test)]
 mod tests {
     use std::collections::HashSet;
-    use std::num::{NonZeroU32, NonZeroU64};
+    use std::num::NonZeroU32;
     use std::sync::Arc;
 
     use common::cpu::CpuBudget;
@@ -499,7 +503,8 @@ mod tests {
 
     use super::*;
     use crate::config::*;
-    use crate::operations::types::{VectorParams, VectorsConfig};
+    use crate::operations::types::VectorsConfig;
+    use crate::operations::vector_params_builder::VectorParamsBuilder;
     use crate::optimizers_builder::OptimizersConfig;
     use crate::shards::replica_set::{AbortShardTransfer, ChangePeerState};
 
@@ -542,13 +547,7 @@ mod tests {
         };
 
         let collection_params = CollectionParams {
-            vectors: VectorsConfig::Single(VectorParams {
-                size: NonZeroU64::new(4).unwrap(),
-                distance: Distance::Dot,
-                hnsw_config: None,
-                quantization_config: None,
-                on_disk: None,
-            }),
+            vectors: VectorsConfig::Single(VectorParamsBuilder::new(4, Distance::Dot).build()),
             shard_number: NonZeroU32::new(4).unwrap(),
             replication_factor: NonZeroU32::new(3).unwrap(),
             write_consistency_factor: NonZeroU32::new(2).unwrap(),

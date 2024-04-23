@@ -51,6 +51,8 @@ fn exact_search_test() {
                 storage_type: VectorStorageType::Memory,
                 index: Indexes::Plain {},
                 quantization_config: None,
+                multi_vec_config: None,
+                datatype: None,
             },
         )]),
         sparse_vector_data: Default::default(),
@@ -162,12 +164,13 @@ fn exact_search_test() {
                     ..Default::default()
                 }),
                 &false.into(),
+                usize::MAX,
             )
             .unwrap();
         let plain_result = segment.vector_data[DEFAULT_VECTOR_NAME]
             .vector_index
             .borrow()
-            .search(&[&query], None, top, None, &false.into())
+            .search(&[&query], None, top, None, &false.into(), usize::MAX)
             .unwrap();
 
         assert_eq!(
@@ -201,12 +204,20 @@ fn exact_search_test() {
                     ..Default::default()
                 }),
                 &false.into(),
+                usize::MAX,
             )
             .unwrap();
         let plain_result = segment.vector_data[DEFAULT_VECTOR_NAME]
             .vector_index
             .borrow()
-            .search(&[&query], filter_query, top, None, &false.into())
+            .search(
+                &[&query],
+                filter_query,
+                top,
+                None,
+                &false.into(),
+                usize::MAX,
+            )
             .unwrap();
 
         assert_eq!(

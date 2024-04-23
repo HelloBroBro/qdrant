@@ -16,14 +16,15 @@ from .assertions import assert_http_ok
 processes = []
 busy_ports = {}
 
+
 class PeerProcess:
     def __init__(self, proc, http_port, grpc_port, p2p_port):
-            self.proc = proc
-            self.http_port = http_port
-            self.grpc_port = grpc_port
-            self.p2p_port = p2p_port
-            self.pid = proc.pid
-    
+        self.proc = proc
+        self.http_port = http_port
+        self.grpc_port = grpc_port
+        self.p2p_port = p2p_port
+        self.pid = proc.pid
+
     def kill(self):
         self.proc.kill()
         # remove allocated ports from the dictionary
@@ -40,14 +41,18 @@ def _occupy_port(port):
     return port
 
 
-@pytest.fixture(autouse=True)
-def every_test():
-    yield
+def kill_all_processes():
     print()
     while len(processes) > 0:
         p = processes.pop(0)
         print(f"Killing {p.pid}")
         p.kill()
+
+
+@pytest.fixture(autouse=True)
+def every_test():
+    yield
+    kill_all_processes()
 
 
 def get_port() -> int:
@@ -60,7 +65,8 @@ def get_port() -> int:
             if allocated_port in busy_ports:
                 continue
             return allocated_port
-        
+
+
 def get_env(p2p_port: int, grpc_port: int, http_port: int) -> Dict[str, str]:
     env = os.environ.copy()
     env["QDRANT__CLUSTER__ENABLED"] = "true"
@@ -122,7 +128,7 @@ def start_peer(peer_dir: Path, log_file: str, bootstrap_uri: str, port=None, ext
 
     this_peer_consensus_uri = get_uri(p2p_port)
     proc = Popen([get_qdrant_exec(), "--bootstrap", bootstrap_uri, "--uri", this_peer_consensus_uri], env=env,
-              cwd=peer_dir, stdout=log_file)
+                 cwd=peer_dir, stdout=log_file)
     processes.append(PeerProcess(proc, http_port, grpc_port, p2p_port))
     return get_uri(http_port)
 
@@ -154,7 +160,7 @@ def start_first_peer(peer_dir: Path, log_file: str, port=None, extra_env=None) -
     return get_uri(http_port), bootstrap_uri
 
 
-def start_cluster(tmp_path, num_peers, port_seed=None, extra_env=None):
+def start_cluster(tmp_path, num_peers, port_seed=None, extra_env=None, headers={}):
     assert_project_root()
     peer_dirs = make_peer_folders(tmp_path, num_peers)
 
@@ -167,7 +173,7 @@ def start_cluster(tmp_path, num_peers, port_seed=None, extra_env=None):
     peer_api_uris.append(bootstrap_api_uri)
 
     # Wait for leader
-    leader = wait_peer_added(bootstrap_api_uri)
+    leader = wait_peer_added(bootstrap_api_uri, headers=headers)
 
     port = None
     # Start other peers
@@ -177,7 +183,7 @@ def start_cluster(tmp_path, num_peers, port_seed=None, extra_env=None):
         peer_api_uris.append(start_peer(peer_dirs[i], f"peer_0_{i}.log", bootstrap_uri, port=port, extra_env=extra_env))
 
     # Wait for cluster
-    wait_for_uniform_cluster_status(peer_api_uris, leader)
+    wait_for_uniform_cluster_status(peer_api_uris, leader, headers=headers)
 
     return peer_api_uris, peer_dirs, bootstrap_uri
 
@@ -251,15 +257,15 @@ def print_collection_cluster_info(peer_api_uri: str, collection_name: str):
     print(json.dumps(get_collection_cluster_info(peer_api_uri, collection_name), indent=4))
 
 
-def get_leader(peer_api_uri: str) -> str:
-    r = requests.get(f"{peer_api_uri}/cluster")
+def get_leader(peer_api_uri: str, headers={}) -> str:
+    r = requests.get(f"{peer_api_uri}/cluster", headers=headers)
     assert_http_ok(r)
     return r.json()["result"]["raft_info"]["leader"]
 
 
-def check_leader(peer_api_uri: str, expected_leader: str) -> bool:
+def check_leader(peer_api_uri: str, expected_leader: str, headers={}) -> bool:
     try:
-        r = requests.get(f"{peer_api_uri}/cluster")
+        r = requests.get(f"{peer_api_uri}/cluster", headers=headers)
         assert_http_ok(r)
         leader = r.json()["result"]["raft_info"]["leader"]
         correct_leader = leader == expected_leader
@@ -272,9 +278,9 @@ def check_leader(peer_api_uri: str, expected_leader: str) -> bool:
         return False
 
 
-def leader_is_defined(peer_api_uri: str) -> bool:
+def leader_is_defined(peer_api_uri: str, headers={}) -> bool:
     try:
-        r = requests.get(f"{peer_api_uri}/cluster")
+        r = requests.get(f"{peer_api_uri}/cluster", headers=headers)
         assert_http_ok(r)
         leader = r.json()["result"]["raft_info"]["leader"]
         return leader is not None
@@ -284,9 +290,9 @@ def leader_is_defined(peer_api_uri: str) -> bool:
         return False
 
 
-def check_cluster_size(peer_api_uri: str, expected_size: int) -> bool:
+def check_cluster_size(peer_api_uri: str, expected_size: int, headers={}) -> bool:
     try:
-        r = requests.get(f"{peer_api_uri}/cluster")
+        r = requests.get(f"{peer_api_uri}/cluster", headers=headers)
         assert_http_ok(r)
         peers = r.json()["result"]["peers"]
         correct_size = len(peers) == expected_size
@@ -299,10 +305,11 @@ def check_cluster_size(peer_api_uri: str, expected_size: int) -> bool:
         return False
 
 
-def all_nodes_cluster_info_consistent(peer_api_uris: [str], expected_leader: str) -> bool:
+def all_nodes_cluster_info_consistent(peer_api_uris: [str], expected_leader: str, headers={}) -> bool:
     expected_size = len(peer_api_uris)
     for uri in peer_api_uris:
-        if check_leader(uri, expected_leader) and check_cluster_size(uri, expected_size):
+        if check_leader(uri, expected_leader, headers=headers) and check_cluster_size(uri, expected_size,
+                                                                                      headers=headers):
             continue
         else:
             return False
@@ -362,9 +369,24 @@ def check_collection_shard_transfers_count(peer_api_uri: str, collection_name: s
     return local_shard_count == expected_shard_transfers_count
 
 
+def check_collection_shard_transfer_method(peer_api_uri: str, collection_name: str,
+                                           expected_method: str) -> bool:
+    collection_cluster_info = get_collection_cluster_info(peer_api_uri, collection_name)
+
+    # Check method on each transfer
+    for transfer in collection_cluster_info["shard_transfers"]:
+        if "method" not in transfer:
+            continue
+        method = transfer["method"]
+        if method == expected_method:
+            return True
+
+    return False
+
+
 def check_collection_shard_transfer_progress(peer_api_uri: str, collection_name: str,
-                                            expected_transfer_progress: int,
-                                            expected_transfer_total: int) -> bool:
+                                             expected_transfer_progress: int,
+                                             expected_transfer_total: int) -> bool:
     collection_cluster_info = get_collection_cluster_info(peer_api_uri, collection_name)
 
     # Check progress on each transfer
@@ -375,7 +397,8 @@ def check_collection_shard_transfer_progress(peer_api_uri: str, collection_name:
 
         # Compare progress or total
         current, total = re.search(r"Transferring records \((\d+)/(\d+)\), started", comment).groups()
-        if current is not None and expected_transfer_progress is not None and int(current) >= expected_transfer_progress:
+        if current is not None and expected_transfer_progress is not None and int(
+                current) >= expected_transfer_progress:
             return True
         if total is not None and expected_transfer_total is not None and int(total) >= expected_transfer_total:
             return True
@@ -408,10 +431,10 @@ WAIT_TIME_SEC = 30
 RETRY_INTERVAL_SEC = 0.5
 
 
-def wait_peer_added(peer_api_uri: str, expected_size: int = 1) -> str:
-    wait_for(check_cluster_size, peer_api_uri, expected_size)
-    wait_for(leader_is_defined, peer_api_uri)
-    return get_leader(peer_api_uri)
+def wait_peer_added(peer_api_uri: str, expected_size: int = 1, headers={}) -> str:
+    wait_for(check_cluster_size, peer_api_uri, expected_size, headers=headers)
+    wait_for(leader_is_defined, peer_api_uri, headers=headers)
+    return get_leader(peer_api_uri, headers=headers)
 
 
 def wait_for_some_replicas_not_active(peer_api_uri: str, collection_name: str):
@@ -430,9 +453,9 @@ def wait_for_all_replicas_active(peer_api_uri: str, collection_name: str):
         raise e
 
 
-def wait_for_uniform_cluster_status(peer_api_uris: [str], expected_leader: str):
+def wait_for_uniform_cluster_status(peer_api_uris: [str], expected_leader: str, headers={}):
     try:
-        wait_for(all_nodes_cluster_info_consistent, peer_api_uris, expected_leader)
+        wait_for(all_nodes_cluster_info_consistent, peer_api_uris, expected_leader, headers=headers)
     except Exception as e:
         print_clusters_info(peer_api_uris)
         raise e
@@ -471,11 +494,21 @@ def wait_for_collection_shard_transfers_count(peer_api_uri: str, collection_name
         raise e
 
 
-def wait_for_collection_shard_transfer_progress(peer_api_uri: str, collection_name: str,
-                                                 expected_transfer_progress: int = None,
-                                                 expected_transfer_total: int = None):
+def wait_for_collection_shard_transfer_method(peer_api_uri: str, collection_name: str,
+                                              expected_method: str):
     try:
-        wait_for(check_collection_shard_transfer_progress, peer_api_uri, collection_name, expected_transfer_progress, expected_transfer_total, wait_for_interval=0.1)
+        wait_for(check_collection_shard_transfer_method, peer_api_uri, collection_name, expected_method)
+    except Exception as e:
+        print_collection_cluster_info(peer_api_uri, collection_name)
+        raise e
+
+
+def wait_for_collection_shard_transfer_progress(peer_api_uri: str, collection_name: str,
+                                                expected_transfer_progress: int = None,
+                                                expected_transfer_total: int = None):
+    try:
+        wait_for(check_collection_shard_transfer_progress, peer_api_uri, collection_name, expected_transfer_progress,
+                 expected_transfer_total, wait_for_interval=0.1)
     except Exception as e:
         print_collection_cluster_info(peer_api_uri, collection_name)
         raise e
@@ -516,11 +549,6 @@ def wait_for_peer_online(peer_api_uri: str, path="/readyz"):
         raise e
 
 
-def check_collection_vectors_count(peer_api_uri: str, collection_name: str, expected_size: int) -> bool:
-    collection_cluster_info = get_collection_info(peer_api_uri, collection_name)
-    return collection_cluster_info['vectors_count'] == expected_size
-
-
 def check_collection_points_count(peer_api_uri: str, collection_name: str, expected_size: int) -> bool:
     collection_cluster_info = get_collection_info(peer_api_uri, collection_name)
     return collection_cluster_info['points_count'] == expected_size
@@ -529,14 +557,6 @@ def check_collection_points_count(peer_api_uri: str, collection_name: str, expec
 def wait_collection_points_count(peer_api_uri: str, collection_name: str, expected_size: int):
     try:
         wait_for(check_collection_points_count, peer_api_uri, collection_name, expected_size)
-    except Exception as e:
-        print_collection_cluster_info(peer_api_uri, collection_name)
-        raise e
-
-
-def wait_collection_vectors_count(peer_api_uri: str, collection_name: str, expected_size: int):
-    try:
-        wait_for(check_collection_vectors_count, peer_api_uri, collection_name, expected_size)
     except Exception as e:
         print_collection_cluster_info(peer_api_uri, collection_name)
         raise e

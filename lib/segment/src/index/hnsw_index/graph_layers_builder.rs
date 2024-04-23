@@ -484,7 +484,7 @@ mod tests {
     use rand::SeedableRng;
 
     use super::*;
-    use crate::data_types::vectors::DenseVector;
+    use crate::data_types::vectors::{DenseVector, VectorElementType};
     use crate::fixtures::index_fixtures::{
         random_vector, FakeFilterContext, TestRawScorerProducer,
     };
@@ -496,7 +496,7 @@ mod tests {
     const M: usize = 8;
 
     #[cfg(not(windows))]
-    fn parallel_graph_build<TMetric: Metric + Sync + Send, R>(
+    fn parallel_graph_build<TMetric: Metric<VectorElementType> + Sync + Send, R>(
         num_vectors: usize,
         dim: usize,
         use_heuristic: bool,
@@ -546,7 +546,7 @@ mod tests {
         (vector_holder, graph_layers)
     }
 
-    fn create_graph_layer<TMetric: Metric, R>(
+    fn create_graph_layer<TMetric: Metric<VectorElementType>, R>(
         num_vectors: usize,
         dim: usize,
         use_heuristic: bool,
@@ -632,7 +632,7 @@ mod tests {
 
         let top = 5;
         let query = random_vector(&mut rng, dim);
-        let processed_query = M::preprocess(query.clone());
+        let processed_query = <M as Metric<VectorElementType>>::preprocess(query.clone());
         let mut reference_top = FixedLengthPriorityQueue::new(top);
         for idx in 0..vector_holder.vectors.len() as PointOffsetType {
             let vec = &vector_holder.vectors.get(idx);
@@ -715,7 +715,7 @@ mod tests {
 
         let top = 5;
         let query = random_vector(&mut rng, dim);
-        let processed_query = M::preprocess(query.clone());
+        let processed_query = <M as Metric<VectorElementType>>::preprocess(query.clone());
         let mut reference_top = FixedLengthPriorityQueue::new(top);
         for idx in 0..vector_holder.vectors.len() as PointOffsetType {
             let vec = &vector_holder.vectors.get(idx);

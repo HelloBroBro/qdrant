@@ -85,3 +85,42 @@ pub struct ScoredPoint {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub shard_key: Option<segment::types::ShardKey>,
 }
+
+/// Point data
+#[derive(Clone, Debug, PartialEq, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub struct Record {
+    /// Id of the point
+    pub id: segment::types::PointIdType,
+    /// Payload - values assigned to the point
+    pub payload: Option<segment::types::Payload>,
+    /// Vector of the point
+    pub vector: Option<VectorStruct>,
+    /// Shard Key
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub shard_key: Option<segment::types::ShardKey>,
+}
+
+/// Vector data separator for named and unnamed modes
+/// Unnamed mode:
+///
+/// {
+///   "vector": [1.0, 2.0, 3.0]
+/// }
+///
+/// or named mode:
+///
+/// {
+///   "vector": {
+///     "vector": [1.0, 2.0, 3.0],
+///     "name": "image-embeddings"
+///   }
+/// }
+#[derive(Debug, Deserialize, Serialize, JsonSchema, Clone, PartialEq)]
+#[serde(rename_all = "snake_case")]
+#[serde(untagged)]
+pub enum NamedVectorStruct {
+    Default(segment::data_types::vectors::DenseVector),
+    Dense(segment::data_types::vectors::NamedVector),
+    Sparse(segment::data_types::vectors::NamedSparseVector),
+}

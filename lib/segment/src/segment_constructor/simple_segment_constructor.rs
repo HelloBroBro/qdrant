@@ -29,6 +29,8 @@ pub fn build_simple_segment(
                     storage_type: VectorStorageType::Memory,
                     index: Indexes::Plain {},
                     quantization_config: None,
+                    multi_vec_config: None,
+                    datatype: None,
                 },
             )]),
             sparse_vector_data: Default::default(),
@@ -53,6 +55,8 @@ pub fn build_multivec_segment(
             storage_type: VectorStorageType::Memory,
             index: Indexes::Plain {},
             quantization_config: None,
+            multi_vec_config: None,
+            datatype: None,
         },
     );
     vectors_config.insert(
@@ -63,6 +67,8 @@ pub fn build_multivec_segment(
             storage_type: VectorStorageType::Memory,
             index: Indexes::Plain {},
             quantization_config: None,
+            multi_vec_config: None,
+            datatype: None,
         },
     );
 

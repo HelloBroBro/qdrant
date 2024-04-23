@@ -5255,7 +5255,7 @@
             "$ref": "#/components/schemas/OptimizersStatus"
           },
           "vectors_count": {
-            "description": "Approximate number of vectors in collection. All vectors in collection are available for querying. Calculated as `points_count x vectors_per_point`. Where `vectors_per_point` is a number of named vectors in schema.",
+            "description": "DEPRECATED: Approximate number of vectors in collection. All vectors in collection are available for querying. Calculated as `points_count x vectors_per_point`. Where `vectors_per_point` is a number of named vectors in schema.",
             "type": "integer",
             "format": "uint",
             "minimum": 0,
@@ -5299,6 +5299,7 @@
         "enum": [
           "green",
           "yellow",
+          "grey",
           "red"
         ]
       },
@@ -5478,6 +5479,16 @@
             "description": "If true, vectors are served from disk, improving RAM usage at the cost of latency Default: false",
             "type": "boolean",
             "nullable": true
+          },
+          "datatype": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Datatype"
+              },
+              {
+                "nullable": true
+              }
+            ]
           }
         }
       },
@@ -5645,6 +5656,14 @@
             "nullable": true
           }
         }
+      },
+      "Datatype": {
+        "description": "Defines which datatype should be used to represent vectors in the storage. Choosing different datatypes allows to optimize memory usage and performance vs accuracy. - For `float32` datatype - vectors are stored as single-precision floating point numbers, 4bytes. - For `uint8` datatype - vectors are stored as unsigned 8-bit integers, 1byte. It expects vector elements to be in range `[0, 255]`.",
+        "type": "string",
+        "enum": [
+          "float32",
+          "uint8"
+        ]
       },
       "ShardingMethod": {
         "type": "string",
@@ -6323,7 +6342,7 @@
         ]
       },
       "NamedVector": {
-        "description": "Vector data with name",
+        "description": "Dense vector data with name",
         "type": "object",
         "required": [
           "name",
@@ -8684,6 +8703,13 @@
             "enum": [
               "snapshot"
             ]
+          },
+          {
+            "description": "Attempt to transfer shard difference by WAL delta.",
+            "type": "string",
+            "enum": [
+              "wal_delta"
+            ]
           }
         ]
       },
@@ -8747,6 +8773,10 @@
                 "nullable": true
               }
             ]
+          },
+          "jwt_rbac": {
+            "type": "boolean",
+            "nullable": true
           },
           "startup": {
             "type": "string",
@@ -9130,6 +9160,28 @@
                 "nullable": true
               }
             ]
+          },
+          "multi_vec_config": {
+            "description": "Vector specific configuration to enable multiple vectors per point",
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/MultiVectorConfig"
+              },
+              {
+                "nullable": true
+              }
+            ]
+          },
+          "datatype": {
+            "description": "Vector specific configuration to set specific storage element type",
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/VectorStorageDatatype"
+              },
+              {
+                "nullable": true
+              }
+            ]
           }
         }
       },
@@ -9200,6 +9252,33 @@
               }
             }
           }
+        ]
+      },
+      "MultiVectorConfig": {
+        "oneOf": [
+          {
+            "type": "object",
+            "required": [
+              "MaxSim"
+            ],
+            "properties": {
+              "MaxSim": {
+                "$ref": "#/components/schemas/MaxSimConfig"
+              }
+            },
+            "additionalProperties": false
+          }
+        ]
+      },
+      "MaxSimConfig": {
+        "type": "object"
+      },
+      "VectorStorageDatatype": {
+        "description": "Storage types for vectors",
+        "type": "string",
+        "enum": [
+          "float32",
+          "uint8"
         ]
       },
       "SparseVectorDataConfig": {
@@ -9842,7 +9921,32 @@
         ],
         "properties": {
           "abort_transfer": {
-            "$ref": "#/components/schemas/MoveShard"
+            "$ref": "#/components/schemas/AbortShardTransfer"
+          }
+        }
+      },
+      "AbortShardTransfer": {
+        "type": "object",
+        "required": [
+          "from_peer_id",
+          "shard_id",
+          "to_peer_id"
+        ],
+        "properties": {
+          "shard_id": {
+            "type": "integer",
+            "format": "uint32",
+            "minimum": 0
+          },
+          "to_peer_id": {
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 0
+          },
+          "from_peer_id": {
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 0
           }
         }
       },

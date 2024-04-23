@@ -54,6 +54,8 @@ fn build_test_segments(path_struct: &Path, path_plain: &Path) -> (Segment, Segme
                 storage_type: VectorStorageType::Memory,
                 index: Indexes::Plain {},
                 quantization_config: None,
+                multi_vec_config: None,
+                datatype: None,
             },
         )]),
         sparse_vector_data: Default::default(),
@@ -189,6 +191,8 @@ fn build_test_segments_nested_payload(path_struct: &Path, path_plain: &Path) -> 
                 storage_type: VectorStorageType::Memory,
                 index: Indexes::Plain {},
                 quantization_config: None,
+                multi_vec_config: None,
+                datatype: None,
             },
         )]),
         sparse_vector_data: Default::default(),
@@ -299,7 +303,6 @@ fn validate_geo_filter(query_filter: Filter) {
                 Some(&query_filter),
                 5,
                 None,
-                &false.into(),
             )
             .unwrap();
 
@@ -324,7 +327,6 @@ fn validate_geo_filter(query_filter: Filter) {
                 Some(&query_filter),
                 5,
                 None,
-                &false.into(),
             )
             .unwrap();
 
@@ -609,7 +611,6 @@ fn test_struct_payload_index() {
                 Some(&query_filter),
                 5,
                 None,
-                &false.into(),
             )
             .unwrap();
         let struct_result = struct_segment
@@ -621,7 +622,6 @@ fn test_struct_payload_index() {
                 Some(&query_filter),
                 5,
                 None,
-                &false.into(),
             )
             .unwrap();
 
@@ -770,7 +770,6 @@ fn test_struct_payload_index_nested_fields() {
                 Some(&query_filter),
                 5,
                 None,
-                &false.into(),
             )
             .unwrap();
         let struct_result = struct_segment
@@ -785,7 +784,6 @@ fn test_struct_payload_index_nested_fields() {
                 Some(&query_filter),
                 5,
                 None,
-                &false.into(),
             )
             .unwrap();
 

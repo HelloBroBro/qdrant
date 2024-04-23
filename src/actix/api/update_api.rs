@@ -4,16 +4,14 @@ use actix_web_validator::{Json, Path, Query};
 use collection::operations::payload_ops::{DeletePayload, SetPayload};
 use collection::operations::point_ops::{PointInsertOperations, PointsSelector, WriteOrdering};
 use collection::operations::vector_ops::{DeleteVectors, UpdateVectors};
-use rbac::jwt::Claims;
 use schemars::JsonSchema;
 use segment::json_path::{JsonPath, JsonPathInterface};
 use serde::{Deserialize, Serialize};
-use storage::content_manager::toc::TableOfContent;
 use storage::dispatcher::Dispatcher;
 use validator::Validate;
 
 use super::CollectionPath;
-use crate::actix::auth::Extension;
+use crate::actix::auth::ActixAccess;
 use crate::actix::helpers::process_response;
 use crate::common::points::{
     do_batch_update_points, do_clear_payload, do_create_index, do_delete_index, do_delete_payload,
@@ -36,11 +34,11 @@ pub struct UpdateParam {
 
 #[put("/collections/{name}/points")]
 async fn upsert_points(
-    toc: web::Data<TableOfContent>,
+    dispatcher: web::Data<Dispatcher>,
     collection: Path<CollectionPath>,
     operation: Json<PointInsertOperations>,
     params: Query<UpdateParam>,
-    claims: Extension<Claims>,
+    ActixAccess(access): ActixAccess,
 ) -> impl Responder {
     let timing = Instant::now();
     let operation = operation.into_inner();
@@ -48,14 +46,14 @@ async fn upsert_points(
     let ordering = params.ordering.unwrap_or_default();
 
     let response = do_upsert_points(
-        toc.into_inner(),
+        dispatcher.toc(&access).clone(),
         collection.into_inner().name,
         operation,
         None,
         None,
         wait,
         ordering,
-        claims.into_inner(),
+        access,
     )
     .await;
     process_response(response, timing)
@@ -63,11 +61,11 @@ async fn upsert_points(
 
 #[post("/collections/{name}/points/delete")]
 async fn delete_points(
-    toc: web::Data<TableOfContent>,
+    dispatcher: web::Data<Dispatcher>,
     collection: Path<CollectionPath>,
     operation: Json<PointsSelector>,
     params: Query<UpdateParam>,
-    claims: Extension<Claims>,
+    ActixAccess(access): ActixAccess,
 ) -> impl Responder {
     let timing = Instant::now();
     let operation = operation.into_inner();
@@ -75,14 +73,14 @@ async fn delete_points(
     let ordering = params.ordering.unwrap_or_default();
 
     let response = do_delete_points(
-        toc.into_inner(),
+        dispatcher.toc(&access).clone(),
         collection.into_inner().name,
         operation,
         None,
         None,
         wait,
         ordering,
-        claims.into_inner(),
+        access,
     )
     .await;
     process_response(response, timing)
@@ -90,11 +88,11 @@ async fn delete_points(
 
 #[put("/collections/{name}/points/vectors")]
 async fn update_vectors(
-    toc: web::Data<TableOfContent>,
+    dispatcher: web::Data<Dispatcher>,
     collection: Path<CollectionPath>,
     operation: Json<UpdateVectors>,
     params: Query<UpdateParam>,
-    claims: Extension<Claims>,
+    ActixAccess(access): ActixAccess,
 ) -> impl Responder {
     let timing = Instant::now();
     let operation = operation.into_inner();
@@ -102,14 +100,14 @@ async fn update_vectors(
     let ordering = params.ordering.unwrap_or_default();
 
     let response = do_update_vectors(
-        toc.into_inner(),
+        dispatcher.toc(&access).clone(),
         collection.into_inner().name,
         operation,
         None,
         None,
         wait,
         ordering,
-        claims.into_inner(),
+        access,
     )
     .await;
     process_response(response, timing)
@@ -117,11 +115,11 @@ async fn update_vectors(
 
 #[post("/collections/{name}/points/vectors/delete")]
 async fn delete_vectors(
-    toc: web::Data<TableOfContent>,
+    dispatcher: web::Data<Dispatcher>,
     collection: Path<CollectionPath>,
     operation: Json<DeleteVectors>,
     params: Query<UpdateParam>,
-    claims: Extension<Claims>,
+    ActixAccess(access): ActixAccess,
 ) -> impl Responder {
     let timing = Instant::now();
     let operation = operation.into_inner();
@@ -129,14 +127,14 @@ async fn delete_vectors(
     let ordering = params.ordering.unwrap_or_default();
 
     let response = do_delete_vectors(
-        toc.into_inner(),
+        dispatcher.toc(&access).clone(),
         collection.into_inner().name,
         operation,
         None,
         None,
         wait,
         ordering,
-        claims.into_inner(),
+        access,
     )
     .await;
     process_response(response, timing)
@@ -144,11 +142,11 @@ async fn delete_vectors(
 
 #[post("/collections/{name}/points/payload")]
 async fn set_payload(
-    toc: web::Data<TableOfContent>,
+    dispatcher: web::Data<Dispatcher>,
     collection: Path<CollectionPath>,
     operation: Json<SetPayload>,
     params: Query<UpdateParam>,
-    claims: Extension<Claims>,
+    ActixAccess(access): ActixAccess,
 ) -> impl Responder {
     let timing = Instant::now();
     let operation = operation.into_inner();
@@ -156,14 +154,14 @@ async fn set_payload(
     let ordering = params.ordering.unwrap_or_default();
 
     let response = do_set_payload(
-        toc.into_inner(),
+        dispatcher.toc(&access).clone(),
         collection.into_inner().name,
         operation,
         None,
         None,
         wait,
         ordering,
-        claims.into_inner(),
+        access,
     )
     .await;
     process_response(response, timing)
@@ -171,11 +169,11 @@ async fn set_payload(
 
 #[put("/collections/{name}/points/payload")]
 async fn overwrite_payload(
-    toc: web::Data<TableOfContent>,
+    dispatcher: web::Data<Dispatcher>,
     collection: Path<CollectionPath>,
     operation: Json<SetPayload>,
     params: Query<UpdateParam>,
-    claims: Extension<Claims>,
+    ActixAccess(access): ActixAccess,
 ) -> impl Responder {
     let timing = Instant::now();
     let operation = operation.into_inner();
@@ -183,14 +181,14 @@ async fn overwrite_payload(
     let ordering = params.ordering.unwrap_or_default();
 
     let response = do_overwrite_payload(
-        toc.into_inner(),
+        dispatcher.toc(&access).clone(),
         collection.into_inner().name,
         operation,
         None,
         None,
         wait,
         ordering,
-        claims.into_inner(),
+        access,
     )
     .await;
     process_response(response, timing)
@@ -198,11 +196,11 @@ async fn overwrite_payload(
 
 #[post("/collections/{name}/points/payload/delete")]
 async fn delete_payload(
-    toc: web::Data<TableOfContent>,
+    dispatcher: web::Data<Dispatcher>,
     collection: Path<CollectionPath>,
     operation: Json<DeletePayload>,
     params: Query<UpdateParam>,
-    claims: Extension<Claims>,
+    ActixAccess(access): ActixAccess,
 ) -> impl Responder {
     let timing = Instant::now();
     let operation = operation.into_inner();
@@ -210,14 +208,14 @@ async fn delete_payload(
     let ordering = params.ordering.unwrap_or_default();
 
     let response = do_delete_payload(
-        toc.into_inner(),
+        dispatcher.toc(&access).clone(),
         collection.into_inner().name,
         operation,
         None,
         None,
         wait,
         ordering,
-        claims.into_inner(),
+        access,
     )
     .await;
     process_response(response, timing)
@@ -225,11 +223,11 @@ async fn delete_payload(
 
 #[post("/collections/{name}/points/payload/clear")]
 async fn clear_payload(
-    toc: web::Data<TableOfContent>,
+    dispatcher: web::Data<Dispatcher>,
     collection: Path<CollectionPath>,
     operation: Json<PointsSelector>,
     params: Query<UpdateParam>,
-    claims: Extension<Claims>,
+    ActixAccess(access): ActixAccess,
 ) -> impl Responder {
     let timing = Instant::now();
     let operation = operation.into_inner();
@@ -237,14 +235,14 @@ async fn clear_payload(
     let ordering = params.ordering.unwrap_or_default();
 
     let response = do_clear_payload(
-        toc.into_inner(),
+        dispatcher.toc(&access).clone(),
         collection.into_inner().name,
         operation,
         None,
         None,
         wait,
         ordering,
-        claims.into_inner(),
+        access,
     )
     .await;
     process_response(response, timing)
@@ -252,11 +250,11 @@ async fn clear_payload(
 
 #[post("/collections/{name}/points/batch")]
 async fn update_batch(
-    toc: web::Data<TableOfContent>,
+    dispatcher: web::Data<Dispatcher>,
     collection: Path<CollectionPath>,
     operations: Json<UpdateOperations>,
     params: Query<UpdateParam>,
-    claims: Extension<Claims>,
+    ActixAccess(access): ActixAccess,
 ) -> impl Responder {
     let timing = Instant::now();
     let operations = operations.into_inner();
@@ -264,14 +262,14 @@ async fn update_batch(
     let ordering = params.ordering.unwrap_or_default();
 
     let response = do_batch_update_points(
-        toc.into_inner(),
+        dispatcher.toc(&access).clone(),
         collection.into_inner().name,
         operations.operations,
         None,
         None,
         wait,
         ordering,
-        claims.into_inner(),
+        access,
     )
     .await;
     process_response(response, timing)
@@ -282,7 +280,7 @@ async fn create_field_index(
     collection: Path<CollectionPath>,
     operation: Json<CreateFieldIndex>,
     params: Query<UpdateParam>,
-    claims: Extension<Claims>,
+    ActixAccess(access): ActixAccess,
 ) -> impl Responder {
     let timing = Instant::now();
     let operation = operation.into_inner();
@@ -297,7 +295,7 @@ async fn create_field_index(
         None,
         wait,
         ordering,
-        claims.into_inner(),
+        access,
     )
     .await;
     process_response(response, timing)
@@ -309,7 +307,7 @@ async fn delete_field_index(
     collection: Path<CollectionPath>,
     field: Path<FieldPath>,
     params: Query<UpdateParam>,
-    claims: Extension<Claims>,
+    ActixAccess(access): ActixAccess,
 ) -> impl Responder {
     let timing = Instant::now();
     let wait = params.wait.unwrap_or(false);
@@ -323,7 +321,7 @@ async fn delete_field_index(
         None,
         wait,
         ordering,
-        claims.into_inner(),
+        access,
     )
     .await;
     process_response(response, timing)

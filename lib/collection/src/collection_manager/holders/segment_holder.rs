@@ -4,18 +4,20 @@ use std::ops::Deref;
 use std::path::Path;
 use std::sync::Arc;
 use std::thread::sleep;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-use itertools::Itertools;
 use parking_lot::{RwLock, RwLockReadGuard, RwLockUpgradableReadGuard, RwLockWriteGuard};
 use rand::seq::SliceRandom;
 use rand::{thread_rng, Rng};
 use segment::common::operation_error::{OperationError, OperationResult};
+use segment::common::version::StorageVersion;
 use segment::entry::entry_point::SegmentEntry;
-use segment::segment::Segment;
-use segment::types::{PointIdType, SeqNumberType};
+use segment::segment::{Segment, SegmentVersion};
+use segment::segment_constructor::build_segment;
+use segment::types::{PointIdType, SegmentConfig, SeqNumberType};
 
 use crate::collection_manager::holders::proxy_segment::ProxySegment;
+use crate::config::CollectionParams;
 use crate::operations::types::CollectionError;
 use crate::shards::update_tracker::UpdateTracker;
 
@@ -55,18 +57,19 @@ fn try_unwrap_with_timeout<T>(
     spin: Duration,
     timeout: Duration,
 ) -> Result<T, Arc<T>> {
-    if timeout.is_zero() {
-        return Err(arc);
-    }
+    let start = Instant::now();
 
     loop {
-        match Arc::try_unwrap(arc) {
-            inner @ Ok(_) => return inner,
-            Err(inner) => {
-                arc = inner;
-                sleep(spin);
-            }
+        arc = match Arc::try_unwrap(arc) {
+            Ok(unwrapped) => return Ok(unwrapped),
+            Err(arc) => arc,
+        };
+
+        if start.elapsed() >= timeout {
+            return Err(arc);
         }
+
+        sleep(spin);
     }
 }
 
@@ -138,7 +141,8 @@ impl From<ProxySegment> for LockedSegment {
 
 #[derive(Default)]
 pub struct SegmentHolder {
-    segments: HashMap<SegmentId, LockedSegment>,
+    appendable_segments: HashMap<SegmentId, LockedSegment>,
+    non_appendable_segments: HashMap<SegmentId, LockedSegment>,
 
     update_tracker: UpdateTracker,
 
@@ -153,16 +157,21 @@ pub struct SegmentHolder {
 pub type LockedSegmentHolder = Arc<RwLock<SegmentHolder>>;
 
 impl<'s> SegmentHolder {
+    /// Iterate over all segments with their IDs
+    ///
+    /// Appendable first, then non-appendable.
     pub fn iter(&'s self) -> impl Iterator<Item = (&SegmentId, &LockedSegment)> + 's {
-        self.segments.iter()
+        self.appendable_segments
+            .iter()
+            .chain(self.non_appendable_segments.iter())
     }
 
     pub fn len(&self) -> usize {
-        self.segments.len()
+        self.appendable_segments.len() + self.non_appendable_segments.len()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.segments.is_empty()
+        self.appendable_segments.is_empty() && self.non_appendable_segments.is_empty()
     }
 
     pub fn update_tracker(&self) -> UpdateTracker {
@@ -171,7 +180,9 @@ impl<'s> SegmentHolder {
 
     fn generate_new_key(&self) -> SegmentId {
         let key = thread_rng().gen::<SegmentId>();
-        if self.segments.contains_key(&key) {
+        if self.appendable_segments.contains_key(&key)
+            || self.non_appendable_segments.contains_key(&key)
+        {
             self.generate_new_key()
         } else {
             key
@@ -183,22 +194,29 @@ impl<'s> SegmentHolder {
     where
         T: Into<LockedSegment>,
     {
-        let key = self.generate_new_key();
-        self.segments.insert(key, segment.into());
-        key
+        let locked_segment = segment.into();
+        self.add_locked(locked_segment)
     }
 
     /// Add new segment to storage which is already LockedSegment
     pub fn add_locked(&mut self, segment: LockedSegment) -> SegmentId {
         let key = self.generate_new_key();
-        self.segments.insert(key, segment);
+        if segment.get().read().is_appendable() {
+            self.appendable_segments.insert(key, segment);
+        } else {
+            self.non_appendable_segments.insert(key, segment);
+        }
         key
     }
 
     pub fn remove(&mut self, remove_ids: &[SegmentId]) -> Vec<LockedSegment> {
         let mut removed_segments = vec![];
         for remove_id in remove_ids {
-            let removed_segment = self.segments.remove(remove_id);
+            let removed_segment = self.appendable_segments.remove(remove_id);
+            if let Some(segment) = removed_segment {
+                removed_segments.push(segment);
+            }
+            let removed_segment = self.non_appendable_segments.remove(remove_id);
             if let Some(segment) = removed_segment {
                 removed_segments.push(segment);
             }
@@ -230,30 +248,53 @@ impl<'s> SegmentHolder {
     }
 
     pub fn get(&self, id: SegmentId) -> Option<&LockedSegment> {
-        self.segments.get(&id)
+        self.appendable_segments
+            .get(&id)
+            .or_else(|| self.non_appendable_segments.get(&id))
     }
 
-    pub fn appendable_segments(&self) -> Vec<SegmentId> {
-        self.segments
-            .iter()
-            .filter(|(_idx, seg)| seg.get().read().is_appendable())
-            .map(|(idx, _seg)| *idx)
-            .collect()
+    pub fn has_appendable_segment(&self) -> bool {
+        !self.appendable_segments.is_empty()
     }
 
-    pub fn non_appendable_segments(&self) -> Vec<SegmentId> {
-        self.segments
-            .iter()
-            .filter(|(_idx, seg)| !seg.get().read().is_appendable())
-            .map(|(idx, _seg)| *idx)
+    /// Get all locked segments, non-appendable first, then appendable.
+    pub fn non_appendable_then_appendable_segments(
+        &'s self,
+    ) -> impl Iterator<Item = LockedSegment> + 's {
+        self.non_appendable_segments
+            .values()
+            .chain(self.appendable_segments.values())
+            .cloned()
+    }
+
+    /// Get two separate lists for non-appendable and appendable locked segments
+    pub fn split_segments(&self) -> (Vec<LockedSegment>, Vec<LockedSegment>) {
+        (
+            self.non_appendable_segments.values().cloned().collect(),
+            self.appendable_segments.values().cloned().collect(),
+        )
+    }
+
+    pub fn appendable_segments_ids(&self) -> Vec<SegmentId> {
+        self.appendable_segments.keys().copied().collect()
+    }
+
+    pub fn non_appendable_segments_ids(&self) -> Vec<SegmentId> {
+        self.non_appendable_segments.keys().copied().collect()
+    }
+
+    pub fn segment_ids(&self) -> Vec<SegmentId> {
+        self.appendable_segments_ids()
+            .into_iter()
+            .chain(self.non_appendable_segments_ids())
             .collect()
     }
 
     pub fn random_appendable_segment(&self) -> Option<LockedSegment> {
-        let segment_ids: Vec<_> = self.appendable_segments();
+        let segment_ids: Vec<_> = self.appendable_segments_ids();
         segment_ids
             .choose(&mut rand::thread_rng())
-            .and_then(|idx| self.segments.get(idx).cloned())
+            .and_then(|idx| self.appendable_segments.get(idx).cloned())
     }
 
     /// Selects point ids, which is stored in this segment
@@ -269,7 +310,7 @@ impl<'s> SegmentHolder {
         F: FnMut(&RwLockReadGuard<dyn SegmentEntry + 'static>) -> OperationResult<bool>,
     {
         let mut processed_segments = 0;
-        for segment in self.segments.values() {
+        for (_id, segment) in self.iter() {
             let is_applied = f(&segment.get().read())?;
             processed_segments += is_applied as usize;
         }
@@ -283,7 +324,7 @@ impl<'s> SegmentHolder {
         let _update_guard = self.update_tracker.update();
 
         let mut processed_segments = 0;
-        for segment in self.segments.values() {
+        for (_id, segment) in self.iter() {
             let is_applied = f(&mut segment.get().write())?;
             processed_segments += is_applied as usize;
         }
@@ -311,7 +352,7 @@ impl<'s> SegmentHolder {
         let _update_guard = self.update_tracker.update();
 
         let mut applied_points = 0;
-        for (idx, segment) in &self.segments {
+        for (idx, segment) in self.iter() {
             // Collect affected points first, we want to lock segment for writing as rare as possible
             let segment_arc = segment.get();
             let segment_lock = segment_arc.upgradable_read();
@@ -368,7 +409,7 @@ impl<'s> SegmentHolder {
 
         // Try to access each segment first without any timeout (fast)
         for segment_id in segment_ids {
-            let segment_opt = self.segments.get(segment_id).map(|x| x.get());
+            let segment_opt = self.get(*segment_id).map(|x| x.get());
             match segment_opt {
                 None => {}
                 Some(segment_lock) => {
@@ -418,7 +459,7 @@ impl<'s> SegmentHolder {
         let _update_guard = self.update_tracker.update();
 
         // Choose random appendable segment from this
-        let appendable_segments = self.appendable_segments();
+        let appendable_segments = self.appendable_segments_ids();
 
         let mut applied_points: HashSet<PointIdType> = Default::default();
 
@@ -463,8 +504,21 @@ impl<'s> SegmentHolder {
     where
         F: FnMut(PointIdType, &RwLockReadGuard<dyn SegmentEntry>) -> OperationResult<bool>,
     {
+        // We must go over non-appendable segments first, then go over appendable segments after
+        // Points may be moved from non-appendable to appendable, because we don't lock all
+        // segments together read ordering is very important here!
+        //
+        // Consider the following sequence:
+        //
+        // 1. Read-lock non-appendable segment A
+        // 2. Atomic move from A to B
+        // 3. Read-lock appendable segment B
+        //
+        // We are guaranteed to read all data consistently, and don't lose any points
+        let segments = self.non_appendable_then_appendable_segments();
+
         let mut read_points = 0;
-        for segment in self.segments.values() {
+        for segment in segments {
             let segment_arc = segment.get();
             let read_segment = segment_arc.read();
             for point in ids.iter().cloned().filter(|id| read_segment.has_point(*id)) {
@@ -481,8 +535,8 @@ impl<'s> SegmentHolder {
     /// This is done to ensure that all data, transferred from non-appendable segments to appendable segments
     /// is persisted, before marking records in non-appendable segments as removed.
     fn segment_flush_ordering(&self) -> impl Iterator<Item = SegmentId> {
-        let appendable_segments = self.appendable_segments();
-        let non_appendable_segments = self.non_appendable_segments();
+        let appendable_segments = self.appendable_segments_ids();
+        let non_appendable_segments = self.non_appendable_segments_ids();
 
         appendable_segments
             .into_iter()
@@ -574,8 +628,7 @@ impl<'s> SegmentHolder {
         segment_ids
             .into_iter()
             .map(|segment_id| {
-                self.segments
-                    .get(&segment_id)
+                self.get(segment_id)
                     .ok_or_else(|| {
                         OperationError::service_error(format!("No segment with ID {segment_id}"))
                     })
@@ -584,20 +637,326 @@ impl<'s> SegmentHolder {
             .collect()
     }
 
+    /// Temporarily proxify all segments and apply function `f` to it.
+    ///
+    /// Intended to smoothly accept writes while performing long-running read operations on each
+    /// segment, such as during snapshotting. It should prevent blocking reads on segments for any
+    /// significant amount of time.
+    ///
+    /// This calls function `f` on all segments, but each segment is temporarily proxified while
+    /// the function is called.
+    ///
+    /// All segments are proxified at the same time on start. That ensures each wrapped (proxied)
+    /// segment is kept at the same point in time. Each segment is unproxied one by one, right
+    /// after function `f` has been applied. That helps keeping proxies as shortlived as possible.
+    ///
+    /// A read lock is kept during the whole process to prevent external actors from messing with
+    /// the segment holder while segments are in proxified state. That means no other actors can
+    /// take a write lock while this operation is running.
+    ///
+    /// As part of this process, a new segment is created. All proxies direct their writes to this
+    /// segment. The segment is added to the collection if it has any operations, otherwise it is
+    /// deleted when all segments are unproxied again.
+    ///
+    /// It is recommended to provide collection parameters. The segment configuration will be
+    /// sourced from it.
+    pub fn proxy_all_segments_and_apply<F>(
+        segments: LockedSegmentHolder,
+        collection_path: &Path,
+        collection_params: Option<&CollectionParams>,
+        f: F,
+    ) -> OperationResult<()>
+    where
+        F: Fn(Arc<RwLock<dyn SegmentEntry>>) -> OperationResult<()>,
+    {
+        let segments_lock = segments.upgradable_read();
+
+        // Proxy all segments
+        log::trace!("Proxying all shard segments to apply function");
+        let (mut proxies, tmp_segment, mut segments_lock) =
+            Self::proxy_all_segments(segments_lock, collection_path, collection_params)?;
+
+        // Apply provided function
+        log::trace!("Applying function on all proxied shard segments");
+        let mut result = Ok(());
+        let mut unproxied_segment_ids = Vec::with_capacity(proxies.len());
+        for (proxy_id, proxy_segment) in &proxies {
+            // Get segment to snapshot
+            let segment = match proxy_segment {
+                LockedSegment::Proxy(proxy_segment) => {
+                    proxy_segment.read().wrapped_segment.clone().get()
+                }
+                // All segments to snapshot should be proxy, warn if this is not the case
+                LockedSegment::Original(segment) => {
+                    debug_assert!(false, "Reached non-proxy segment while applying function to proxies, this should not happen, ignoring");
+                    segment.clone()
+                }
+            };
+
+            // Call provided function on segment
+            if let Err(err) = f(segment) {
+                result = Err(OperationError::service_error(format!(
+                    "Applying function to a proxied shard segment {proxy_id} failed: {err}"
+                )));
+                break;
+            }
+
+            // Try to unproxy/release this segment since we don't use it anymore
+            // Unproxying now prevent unnecessary writes to the temporary segment
+            match Self::try_unproxy_segment(segments_lock, *proxy_id, proxy_segment.clone()) {
+                Ok(lock) => {
+                    segments_lock = lock;
+                    unproxied_segment_ids.push(*proxy_id);
+                }
+                Err(lock) => segments_lock = lock,
+            }
+        }
+        proxies.retain(|(id, _)| !unproxied_segment_ids.contains(id));
+
+        // Unproxy all segments
+        // Always do this to prevent leaving proxy segments behind
+        log::trace!("Unproxying all shard segments after function is applied");
+        Self::unproxy_all_segments(segments_lock, proxies, tmp_segment)?;
+
+        result
+    }
+
+    /// Proxy all shard segments for [`proxy_all_segments_and_apply`]
+    #[allow(clippy::type_complexity)]
+    fn proxy_all_segments<'a>(
+        segments_lock: RwLockUpgradableReadGuard<'a, SegmentHolder>,
+        collection_path: &Path,
+        collection_params: Option<&CollectionParams>,
+    ) -> OperationResult<(
+        Vec<(SegmentId, LockedSegment)>,
+        LockedSegment,
+        RwLockUpgradableReadGuard<'a, SegmentHolder>,
+    )> {
+        // Source config for temporary segment which we target all writes to
+        let config = match collection_params {
+            // Base config on collection params
+            Some(collection_params) => SegmentConfig {
+                vector_data: collection_params
+                    .to_base_vector_data()
+                    .map_err(|err| OperationError::service_error(format!("Failed to source dense vector configuration from collection parameters: {err:?}")))?,
+                sparse_vector_data: collection_params
+                    .to_sparse_vector_data()
+                    .map_err(|err| OperationError::service_error(format!("Failed to source sparse vector configuration from collection parameters: {err:?}")))?,
+                payload_storage_type: collection_params.payload_storage_type(),
+            },
+            // Base config on existing appendable or non-appendable segment
+            None => {
+                segments_lock
+                    .random_appendable_segment()
+                    .ok_or_else(|| OperationError::service_error("No existing segment to source temporary segment configuration from"))?
+                    .get()
+                    .read()
+                    .config()
+                    .clone()
+            }
+        };
+
+        // Create temporary appendable segment to direct all proxy writes into
+        let tmp_segment = LockedSegment::new(build_segment(collection_path, &config, false)?);
+
+        // List all segments we want to snapshot
+        let segment_ids = segments_lock.segment_ids();
+
+        // Create proxy for all segments
+        let mut new_proxies = Vec::with_capacity(segment_ids.len());
+        for segment_id in segment_ids {
+            let segment = segments_lock.get(segment_id).unwrap();
+            let mut proxy = ProxySegment::new(
+                segment.clone(),
+                tmp_segment.clone(),
+                Default::default(),
+                Default::default(),
+                Default::default(),
+            );
+
+            // Write segment is fresh, so it has no operations
+            // Operation with number 0 will be applied
+            proxy.replicate_field_indexes(0)?;
+            new_proxies.push((segment_id, proxy));
+        }
+
+        // Save segment version once all payload indices have been converted
+        // If this ends up not being saved due to a crash, the segment will not be used
+        match &tmp_segment {
+            LockedSegment::Original(segment) => {
+                let segment_path = &segment.read().current_path;
+                SegmentVersion::save(segment_path)?;
+            }
+            LockedSegment::Proxy(_) => unreachable!(),
+        }
+
+        // Replace all segments with proxies
+        // We cannot fail past this point to prevent only having some segments proxified
+        let mut proxies = Vec::with_capacity(new_proxies.len());
+        let mut write_segments = RwLockUpgradableReadGuard::upgrade(segments_lock);
+        for (segment_id, mut proxy) in new_proxies {
+            // Replicate field indexes the second time, because optimized segments could have
+            // been changed. The probability is small, though, so we can afford this operation
+            // under the full collection write lock
+            let op_num = proxy.version();
+            if let Err(err) = proxy.replicate_field_indexes(op_num) {
+                log::error!("Failed to replicate proxy segment field indexes, ignoring: {err}");
+            }
+
+            let (segment_id, segments) = write_segments.swap(proxy, &[segment_id]);
+            debug_assert_eq!(segments.len(), 1);
+            let locked_proxy_segment = write_segments
+                .get(segment_id)
+                .cloned()
+                .expect("failed to get segment from segment holder we just swapped in");
+            proxies.push((segment_id, locked_proxy_segment));
+        }
+        let segments_lock = RwLockWriteGuard::downgrade_to_upgradable(write_segments);
+
+        Ok((proxies, tmp_segment, segments_lock))
+    }
+
+    /// Try to unproxy a single shard segment for [`proxy_all_segments_and_apply`]
+    ///
+    /// # Warning
+    ///
+    /// If unproxying fails an error is returned with the lock and the proxy is left behind in the
+    /// shard holder.
+    fn try_unproxy_segment(
+        segments_lock: RwLockUpgradableReadGuard<SegmentHolder>,
+        proxy_id: SegmentId,
+        proxy_segment: LockedSegment,
+    ) -> Result<RwLockUpgradableReadGuard<SegmentHolder>, RwLockUpgradableReadGuard<SegmentHolder>>
+    {
+        // We must propagate all changes in the proxy into their wrapped segments, as we'll put the
+        // wrapped segment back into the segment holder. This can be an expensive step if we
+        // collected a lot of changes in the proxy, so we do this in two batches to prevent
+        // unnecessary locking. First we propagate all changes with a read lock on the shard
+        // holder, to prevent blocking other readers. Second we propagate any new changes again
+        // with a write lock on the segment holder, blocking other operations. This second batch
+        // should be very fast, as we already propagated all changes in the first, which is why we
+        // can hold a write lock. Once done, we can swap out the proxy for the wrapped shard.
+
+        let proxy_segment = match proxy_segment {
+            LockedSegment::Proxy(proxy_segment) => proxy_segment,
+            LockedSegment::Original(_) => {
+                log::warn!("Unproxying segment {proxy_id} that is not proxified, that is unexpected, skipping");
+                return Err(segments_lock);
+            }
+        };
+
+        // Batch 1: propagate changes to wrapped segment with segment holder read lock
+        if let Err(err) = proxy_segment.read().propagate_to_wrapped() {
+            log::error!("Propagating proxy segment {proxy_id} changes to wrapped segment failed, ignoring: {err}");
+        }
+
+        let mut write_segments = RwLockUpgradableReadGuard::upgrade(segments_lock);
+
+        // Batch 2: propagate changes to wrapped segment with segment holder write lock
+        // Propagate proxied changes to wrapped segment, take it out and swap with proxy
+        let wrapped_segment = {
+            let proxy_segment = proxy_segment.read();
+            if let Err(err) = proxy_segment.propagate_to_wrapped() {
+                log::error!("Propagating proxy segment {proxy_id} changes to wrapped segment failed, ignoring: {err}");
+            }
+            proxy_segment.wrapped_segment.clone()
+        };
+        let (_, segments) = write_segments.swap(wrapped_segment, &[proxy_id]);
+        debug_assert_eq!(segments.len(), 1);
+
+        // Downgrade write lock to read and give it back
+        Ok(RwLockWriteGuard::downgrade_to_upgradable(write_segments))
+    }
+
+    /// Unproxy all shard segments for [`proxy_all_segments_and_apply`]
+    fn unproxy_all_segments(
+        segments_lock: RwLockUpgradableReadGuard<SegmentHolder>,
+        proxies: Vec<(SegmentId, LockedSegment)>,
+        tmp_segment: LockedSegment,
+    ) -> OperationResult<()> {
+        // We must propagate all changes in the proxy into their wrapped segments, as we'll put the
+        // wrapped segment back into the segment holder. This can be an expensive step if we
+        // collected a lot of changes in the proxy, so we do this in two batches to prevent
+        // unnecessary locking. First we propagate all changes with a read lock on the shard
+        // holder, to prevent blocking other readers. Second we propagate any new changes again
+        // with a write lock on the segment holder, blocking other operations. This second batch
+        // should be very fast, as we already propagated all changes in the first, which is why we
+        // can hold a write lock. Once done, we can swap out the proxy for the wrapped shard.
+
+        // Batch 1: propagate changes to wrapped segment with segment holder read lock
+        proxies
+            .iter()
+            .filter_map(|(proxy_id, proxy_segment)| match proxy_segment {
+                LockedSegment::Proxy(proxy_segment) => Some((proxy_id, proxy_segment)),
+                LockedSegment::Original(_) => None,
+            }).for_each(|(proxy_id, proxy_segment)| {
+                if let Err(err) = proxy_segment.read().propagate_to_wrapped() {
+                    log::error!("Propagating proxy segment {proxy_id} changes to wrapped segment failed, ignoring: {err}");
+                }
+            });
+
+        // Batch 2: propagate changes to wrapped segment with segment holder write lock
+        // Swap out each proxy with wrapped segment once changes are propagated
+        let mut write_segments = RwLockUpgradableReadGuard::upgrade(segments_lock);
+        for (proxy_id, proxy_segment) in proxies {
+            match proxy_segment {
+                // Propagate proxied changes to wrapped segment, take it out and swap with proxy
+                LockedSegment::Proxy(proxy_segment) => {
+                    let wrapped_segment = {
+                        let proxy_segment = proxy_segment.read();
+                        if let Err(err) = proxy_segment.propagate_to_wrapped() {
+                            log::error!("Propagating proxy segment {proxy_id} changes to wrapped segment failed, ignoring: {err}");
+                        }
+                        proxy_segment.wrapped_segment.clone()
+                    };
+                    let (_, segments) = write_segments.swap(wrapped_segment, &[proxy_id]);
+                    debug_assert_eq!(segments.len(), 1);
+                }
+                // If already unproxied, do nothing
+                LockedSegment::Original(_) => {}
+            }
+        }
+
+        // Finalize temporary segment we proxied writes to
+        // Append a temp segment to collection if it is not empty or there is no other appendable segment
+        let available_points = tmp_segment.get().read().available_point_count();
+        let has_appendable_segment = write_segments.has_appendable_segment();
+        if available_points > 0 || !has_appendable_segment {
+            log::trace!("Keeping temporary segment with {available_points} points");
+            write_segments.add_locked(tmp_segment);
+        } else {
+            log::trace!("Dropping temporary segment with no changes");
+            tmp_segment.drop_data()?;
+        }
+
+        Ok(())
+    }
+
     /// Take a snapshot of all segments into `snapshot_dir_path`
     ///
-    /// Shortcuts at the first failing segment snapshot
+    /// It is recommended to provide collection parameters. This function internally creates a
+    /// temporary segment, which will source the configuration from it.
+    ///
+    /// Shortcuts at the first failing segment snapshot.
     pub fn snapshot_all_segments(
-        &self,
+        segments: LockedSegmentHolder,
+        collection_path: &Path,
+        collection_params: Option<&CollectionParams>,
         temp_dir: &Path,
         snapshot_dir_path: &Path,
     ) -> OperationResult<()> {
-        for segment in self.segments.values() {
-            let segment_lock = segment.get();
-            let read_segment = segment_lock.read();
-            read_segment.take_snapshot(temp_dir, snapshot_dir_path)?;
-        }
-        Ok(())
+        // Snapshotting may take long-running read locks on segments blocking incoming writes, do
+        // this through proxied segments to allow writes to continue.
+        Self::proxy_all_segments_and_apply(
+            segments,
+            collection_path,
+            collection_params,
+            |segment| {
+                let read_segment = segment.read();
+                read_segment.take_snapshot(temp_dir, snapshot_dir_path)?;
+                Ok(())
+            },
+        )
     }
 
     pub fn report_optimizer_error<E: Into<CollectionError>>(&mut self, error: E) {
@@ -622,7 +981,7 @@ impl<'s> SegmentHolder {
 
         let mut removed_points = 0;
         for (segment_id, points) in points_to_remove {
-            let locked_segment = self.segments.get(&segment_id).unwrap();
+            let locked_segment = self.get(segment_id).unwrap();
             let segment_arc = locked_segment.get();
             let mut write_segment = segment_arc.write();
             for point_id in points {
@@ -637,10 +996,9 @@ impl<'s> SegmentHolder {
 
     fn find_duplicated_points(&self) -> OperationResult<HashMap<SegmentId, Vec<PointIdType>>> {
         let segments = self
-            .segments
             .iter()
             .map(|(&segment_id, locked_segment)| (segment_id, locked_segment.get()))
-            .collect_vec();
+            .collect::<Vec<_>>();
         let locked_segments = BTreeMap::from_iter(
             segments
                 .iter()
@@ -797,6 +1155,113 @@ mod tests {
         assert_eq!(read_segment_2.has_point(12.into()), update_nonappendable);
     }
 
+    /// Test applying points and conditionally moving them if operation versions are off
+    ///
+    /// More specifically, this tests the move is still applied correctly even if segments already
+    /// have a newer version. That very situation can happen when replaying the WAL after a crash
+    /// where only some of the segments have been flushed properly.
+    ///
+    /// Before <https://github.com/qdrant/qdrant/pull/4060> the copy and delete operation to move a
+    /// point to another segment may only be partially executed if an operation ID was given that
+    /// is older than the current segment version. It resulted in missing points. This test asserts
+    /// this cannot happen anymore.
+    #[rstest::rstest]
+    #[case::segments_older(false, false)]
+    #[case::non_appendable_newer_appendable_older(true, false)]
+    #[case::non_appendable_older_appendable_newer(false, true)]
+    #[case::segments_newer(true, true)]
+    fn test_apply_and_move_old_versions(
+        #[case] segment_1_high_version: bool,
+        #[case] segment_2_high_version: bool,
+    ) {
+        let dir = Builder::new().prefix("segment_dir").tempdir().unwrap();
+
+        let mut segment1 = build_segment_1(dir.path());
+        let mut segment2 = build_segment_2(dir.path());
+
+        // Insert operation 100 with point 123 and 456 into segment 1, and 789 into segment 2
+        segment1
+            .upsert_point(
+                100,
+                123.into(),
+                segment::data_types::vectors::only_default_vector(&[0.0, 1.0, 2.0, 3.0]),
+            )
+            .unwrap();
+        segment1
+            .upsert_point(
+                100,
+                456.into(),
+                segment::data_types::vectors::only_default_vector(&[0.0, 1.0, 2.0, 3.0]),
+            )
+            .unwrap();
+        segment2
+            .upsert_point(
+                100,
+                789.into(),
+                segment::data_types::vectors::only_default_vector(&[0.0, 1.0, 2.0, 3.0]),
+            )
+            .unwrap();
+
+        // Bump segment version of segment 1 and/or 2 to a high value
+        // Here we insert a random point to achieve this, normally this could happen on restart if
+        // segments are not all flushed at the same time
+        if segment_1_high_version {
+            segment1
+                .upsert_point(
+                    99999,
+                    99999.into(),
+                    segment::data_types::vectors::only_default_vector(&[0.0, 0.0, 0.0, 0.0]),
+                )
+                .unwrap();
+        }
+        if segment_2_high_version {
+            segment2
+                .upsert_point(
+                    99999,
+                    99999.into(),
+                    segment::data_types::vectors::only_default_vector(&[0.0, 0.0, 0.0, 0.0]),
+                )
+                .unwrap();
+        }
+
+        // Segment 1 is non-appendable, segment 2 is appendable
+        segment1.appendable_flag = false;
+
+        let mut holder = SegmentHolder::default();
+        let sid1 = holder.add(segment1);
+        let sid2 = holder.add(segment2);
+
+        // Update point 123, 456 and 789 in the non-appendable segment to move it to segment 2
+        let op_num = 101;
+        let mut processed_points: Vec<PointIdType> = vec![];
+        holder
+            .apply_points_with_conditional_move(
+                op_num,
+                &[123.into(), 456.into(), 789.into()],
+                |point_id, segment| {
+                    processed_points.push(point_id);
+                    assert!(segment.has_point(point_id));
+                    Ok(true)
+                },
+                |_| false,
+            )
+            .unwrap();
+        assert_eq!(3, processed_points.len());
+
+        let locked_segment_1 = holder.get(sid1).unwrap().get();
+        let read_segment_1 = locked_segment_1.read();
+        let locked_segment_2 = holder.get(sid2).unwrap().get();
+        let read_segment_2 = locked_segment_2.read();
+
+        // Point 123 and 456 should have moved from segment 1 into 2
+        assert!(!read_segment_1.has_point(123.into()));
+        assert!(!read_segment_1.has_point(456.into()));
+        assert!(!read_segment_1.has_point(789.into()));
+        assert!(read_segment_2.has_point(123.into()));
+        assert!(read_segment_2.has_point(456.into()));
+        assert!(read_segment_2.has_point(789.into()));
+    }
+
     #[test]
     fn test_points_deduplication() {
         let dir = Builder::new().prefix("segment_dir").tempdir().unwrap();
@@ -850,11 +1315,19 @@ mod tests {
         let sid2 = holder.add(segment2);
         assert_ne!(sid1, sid2);
 
+        let holder = Arc::new(RwLock::new(holder));
+
+        let collection_dir = Builder::new().prefix("collection_dir").tempdir().unwrap();
         let temp_dir = Builder::new().prefix("temp_dir").tempdir().unwrap();
         let snapshot_dir = Builder::new().prefix("snapshot_dir").tempdir().unwrap();
-        holder
-            .snapshot_all_segments(temp_dir.path(), snapshot_dir.path())
-            .unwrap();
+        SegmentHolder::snapshot_all_segments(
+            holder,
+            collection_dir.path(),
+            None,
+            temp_dir.path(),
+            snapshot_dir.path(),
+        )
+        .unwrap();
 
         let archive_count = read_dir(&snapshot_dir).unwrap().count();
         // one archive produced per concrete segment in the SegmentHolder

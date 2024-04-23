@@ -1,4 +1,4 @@
-use std::cmp::max;
+use std::cmp;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
@@ -106,29 +106,34 @@ impl ProxySegment {
             // Point is already removed from wrapped segment
             return Ok(false);
         }
-        let wrapped_segment = self.wrapped_segment.get();
-        let wrapped_segment_guard = wrapped_segment.read();
-        if !wrapped_segment_guard.has_point(point_id) {
-            // Point is not in wrapped segment
-            return Ok(false);
-        }
 
-        let (all_vectors, payload) = (
-            wrapped_segment_guard.all_vectors(point_id)?,
-            wrapped_segment_guard.payload(point_id)?,
-        );
+        {
+            let wrapped_segment = self.wrapped_segment.get();
+            let wrapped_segment_guard = wrapped_segment.read();
+            if !wrapped_segment_guard.has_point(point_id) {
+                // Point is not in wrapped segment
+                return Ok(false);
+            }
+
+            let (all_vectors, payload) = (
+                wrapped_segment_guard.all_vectors(point_id)?,
+                wrapped_segment_guard.payload(point_id)?,
+            );
+
+            {
+                let segment_arc = self.write_segment.get();
+                let mut write_segment = segment_arc.write();
+
+                write_segment.upsert_point(op_num, point_id, all_vectors)?;
+                if !payload.is_empty() {
+                    write_segment.set_full_payload(op_num, point_id, &payload)?;
+                }
+            }
+        };
 
         {
             let mut deleted_points_write = RwLockUpgradableReadGuard::upgrade(deleted_points_guard);
             deleted_points_write.insert(point_id);
-        }
-
-        let segment_arc = self.write_segment.get();
-        let mut write_segment = segment_arc.write();
-
-        write_segment.upsert_point(op_num, point_id, all_vectors)?;
-        if !payload.is_empty() {
-            write_segment.set_full_payload(op_num, point_id, &payload)?;
         }
 
         Ok(true)
@@ -158,11 +163,91 @@ impl ProxySegment {
             }
         }
     }
+
+    /// Propagate changes in this proxy to the wrapped segment
+    ///
+    /// This propagates:
+    /// - delete (or moved) points
+    /// - deleted payload indexes
+    /// - created payload indexes
+    ///
+    /// This is required if making both the wrapped segment and the writable segment available in a
+    /// shard holder at the same time. If the wrapped segment is thrown away, then this is not
+    /// required.
+    pub(super) fn propagate_to_wrapped(&self) -> OperationResult<()> {
+        let deleted_points = self.deleted_points.upgradable_read();
+        let wrapped_segment = self.wrapped_segment.get();
+        let mut wrapped_segment = wrapped_segment.write();
+        let op_num = wrapped_segment.version();
+
+        // Propagate deleted points
+        {
+            if !deleted_points.is_empty() {
+                for point_id in deleted_points.iter() {
+                    wrapped_segment.delete_point(op_num, *point_id)?;
+                }
+                RwLockUpgradableReadGuard::upgrade(deleted_points).clear();
+            } else {
+                drop(deleted_points);
+            }
+        }
+
+        // Propagate deleted indexes
+        {
+            let deleted_indexes = self.deleted_indexes.upgradable_read();
+            if !deleted_indexes.is_empty() {
+                for key in deleted_indexes.iter() {
+                    wrapped_segment.delete_field_index(op_num, key)?;
+                }
+                RwLockUpgradableReadGuard::upgrade(deleted_indexes).clear();
+            }
+        }
+
+        // Propagate created indexes
+        {
+            let created_indexes = self.created_indexes.upgradable_read();
+            if !created_indexes.is_empty() {
+                for (key, field_schema) in created_indexes.iter() {
+                    wrapped_segment.create_field_index(op_num, key, Some(field_schema))?;
+                }
+                RwLockUpgradableReadGuard::upgrade(created_indexes).clear();
+            }
+        }
+
+        Ok(())
+    }
+
+    /// This function is a simplified version of `search_batch` intended for testing purposes.
+    #[allow(clippy::too_many_arguments)]
+    pub fn search(
+        &self,
+        vector_name: &str,
+        vector: &QueryVector,
+        with_payload: &WithPayload,
+        with_vector: &WithVector,
+        filter: Option<&Filter>,
+        top: usize,
+        params: Option<&SearchParams>,
+    ) -> OperationResult<Vec<ScoredPoint>> {
+        let result = self.search_batch(
+            vector_name,
+            &[vector],
+            with_payload,
+            with_vector,
+            filter,
+            top,
+            params,
+            &false.into(),
+            usize::MAX,
+        )?;
+
+        Ok(result.into_iter().next().unwrap())
+    }
 }
 
 impl SegmentEntry for ProxySegment {
     fn version(&self) -> SeqNumberType {
-        max(
+        cmp::max(
             self.wrapped_segment.get().read().version(),
             self.write_segment.get().read().version(),
         )
@@ -177,68 +262,6 @@ impl SegmentEntry for ProxySegment {
             .or_else(|| self.wrapped_segment.get().read().point_version(point_id))
     }
 
-    fn search(
-        &self,
-        vector_name: &str,
-        vector: &QueryVector,
-        with_payload: &WithPayload,
-        with_vector: &WithVector,
-        filter: Option<&Filter>,
-        top: usize,
-        params: Option<&SearchParams>,
-        is_stopped: &AtomicBool,
-    ) -> OperationResult<Vec<ScoredPoint>> {
-        let deleted_points = self.deleted_points.read();
-
-        // Some point might be deleted after temporary segment creation
-        // We need to prevent them from being found by search request
-        // That is why we need to pass additional filter for deleted points
-        let do_update_filter = !deleted_points.is_empty();
-        let mut wrapped_result = if do_update_filter {
-            // ToDo: Come up with better way to pass deleted points into Filter
-            // e.g. implement AtomicRefCell for Serializer.
-            // This copy might slow process down if there will be a lot of deleted points
-            let wrapped_filter =
-                self.add_deleted_points_condition_to_filter(filter, &deleted_points);
-
-            self.wrapped_segment.get().read().search(
-                vector_name,
-                vector,
-                with_payload,
-                with_vector,
-                Some(&wrapped_filter),
-                top,
-                params,
-                is_stopped,
-            )?
-        } else {
-            self.wrapped_segment.get().read().search(
-                vector_name,
-                vector,
-                with_payload,
-                with_vector,
-                filter,
-                top,
-                params,
-                is_stopped,
-            )?
-        };
-
-        let mut write_result = self.write_segment.get().read().search(
-            vector_name,
-            vector,
-            with_payload,
-            with_vector,
-            filter,
-            top,
-            params,
-            is_stopped,
-        )?;
-
-        wrapped_result.append(&mut write_result);
-        Ok(wrapped_result)
-    }
-
     fn search_batch(
         &self,
         vector_name: &str,
@@ -249,6 +272,7 @@ impl SegmentEntry for ProxySegment {
         top: usize,
         params: Option<&SearchParams>,
         is_stopped: &AtomicBool,
+        search_optimized_threshold_kb: usize,
     ) -> OperationResult<Vec<Vec<ScoredPoint>>> {
         let deleted_points = self.deleted_points.read();
 
@@ -272,6 +296,7 @@ impl SegmentEntry for ProxySegment {
                 top,
                 params,
                 is_stopped,
+                search_optimized_threshold_kb,
             )?
         } else {
             self.wrapped_segment.get().read().search_batch(
@@ -283,6 +308,7 @@ impl SegmentEntry for ProxySegment {
                 top,
                 params,
                 is_stopped,
+                search_optimized_threshold_kb,
             )?
         };
         let mut write_results = self.write_segment.get().read().search_batch(
@@ -294,6 +320,7 @@ impl SegmentEntry for ProxySegment {
             top,
             params,
             is_stopped,
+            search_optimized_threshold_kb,
         )?;
         for (index, write_result) in write_results.iter_mut().enumerate() {
             wrapped_results[index].append(write_result)
@@ -676,26 +703,22 @@ impl SegmentEntry for ProxySegment {
         let deleted_indexes_guard = self.deleted_indexes.read();
         let created_indexes_guard = self.created_indexes.read();
 
-        if deleted_points_guard.is_empty()
+        let wrapped_version = self.wrapped_segment.get().read().flush(sync)?;
+        let write_segment_version = self.write_segment.get().read().flush(sync)?;
+
+        let is_all_empty = deleted_points_guard.is_empty()
             && deleted_indexes_guard.is_empty()
-            && created_indexes_guard.is_empty()
-        {
-            // Proxy changes are empty, therefore it is safe to flush write segment
-            // This workaround only makes sense in a context of batch update of new points:
-            //  - initial upload
-            //  - incremental updates
-            let wrapped_version = self.wrapped_segment.get().read().flush(sync)?;
-            let write_segment_version = self.write_segment.get().read().flush(sync)?;
-            let flushed_version = max(wrapped_version, write_segment_version);
-            *self.last_flushed_version.write() = Some(flushed_version);
-            Ok(flushed_version)
+            && created_indexes_guard.is_empty();
+
+        let flushed_version = if is_all_empty {
+            cmp::max(write_segment_version, wrapped_version)
         } else {
-            // If intermediate state is not empty - that is possible that some changes are not persisted
-            Ok(self
-                .last_flushed_version
-                .read()
-                .unwrap_or_else(|| self.wrapped_segment.get().read().version()))
-        }
+            cmp::min(write_segment_version, wrapped_version)
+        };
+
+        let _ = self.last_flushed_version.write().insert(flushed_version);
+
+        Ok(flushed_version)
     }
 
     fn drop_data(self) -> OperationResult<()> {
@@ -887,7 +910,6 @@ mod tests {
                 None,
                 10,
                 None,
-                &false.into(),
             )
             .unwrap();
 
@@ -955,7 +977,6 @@ mod tests {
                 None,
                 10,
                 None,
-                &false.into(),
             )
             .unwrap();
 
@@ -971,6 +992,7 @@ mod tests {
                 10,
                 None,
                 &false.into(),
+                10_000,
             )
             .unwrap();
 
@@ -1010,7 +1032,6 @@ mod tests {
                 None,
                 10,
                 None,
-                &false.into(),
             )
             .unwrap();
 
@@ -1026,6 +1047,7 @@ mod tests {
                 10,
                 None,
                 &false.into(),
+                10_000,
             )
             .unwrap();
 
@@ -1073,7 +1095,6 @@ mod tests {
                     None,
                     10,
                     None,
-                    &false.into(),
                 )
                 .unwrap();
             all_single_results.push(res);
@@ -1091,6 +1112,7 @@ mod tests {
                 10,
                 None,
                 &false.into(),
+                10_000,
             )
             .unwrap();
 
@@ -1377,6 +1399,8 @@ mod tests {
                         storage_type: VectorStorageType::Memory,
                         index: Indexes::Plain {},
                         quantization_config: None,
+                        multi_vec_config: None,
+                        datatype: None,
                     },
                 ),
                 (
@@ -1387,6 +1411,8 @@ mod tests {
                         storage_type: VectorStorageType::Memory,
                         index: Indexes::Plain {},
                         quantization_config: None,
+                        multi_vec_config: None,
+                        datatype: None,
                     },
                 ),
             ]),
@@ -1491,5 +1517,114 @@ mod tests {
         let segment_info = proxy_segment.info();
         assert_eq!(segment_info.num_points, 3);
         assert_eq!(segment_info.num_vectors, 4);
+    }
+
+    #[test]
+    fn test_proxy_segment_flush() {
+        let tmp_dir = tempfile::Builder::new()
+            .prefix("segment_dir")
+            .tempdir()
+            .unwrap();
+
+        let locked_wrapped_segment = LockedSegment::new(build_segment_1(tmp_dir.path()));
+        let locked_write_segment = LockedSegment::new(empty_segment(tmp_dir.path()));
+
+        let mut proxy_segment = ProxySegment::new(
+            locked_wrapped_segment.clone(),
+            locked_write_segment.clone(),
+            Default::default(),
+            Default::default(),
+            Default::default(),
+        );
+
+        // Unwrapped `LockedSegment`s for convenient access
+        let LockedSegment::Original(wrapped_segment) = locked_wrapped_segment.clone() else {
+            unreachable!();
+        };
+
+        let LockedSegment::Original(write_segment) = locked_write_segment.clone() else {
+            unreachable!()
+        };
+
+        // - `wrapped_segment` has unflushed data
+        // - `write_segment` has no data
+        // - `proxy_segment` has no in-memory data
+        // - flush `proxy_segment`, ensure:
+        //   - `wrapped_segment` is flushed
+        //   - `ProxySegment::flush` returns `wrapped_segment`'s persisted version
+
+        let flushed_version = proxy_segment.flush(true).unwrap();
+        let wrapped_segment_persisted_version = *wrapped_segment.read().persisted_version.lock();
+        assert_eq!(Some(flushed_version), wrapped_segment_persisted_version);
+
+        // - `wrapped_segment` has unflushed data
+        // - `write_segment` has unflushed data
+        // - `proxy_segment` has no in-memory data
+        // - flush `proxy_segment`, ensure:
+        //   - `wrapped_segment` is flushed
+        //   - `write_segment` is flushed
+        //   - `ProxySegment::flush` returns `write_segment`'s persisted version
+
+        let current_version = proxy_segment.version();
+
+        wrapped_segment
+            .write()
+            .upsert_point(
+                current_version + 1,
+                42.into(),
+                only_default_vector(&[4.0, 2.0, 0.0, 0.0]),
+            )
+            .unwrap();
+
+        proxy_segment
+            .upsert_point(
+                current_version + 2,
+                69.into(),
+                only_default_vector(&[6.0, 9.0, 0.0, 0.0]),
+            )
+            .unwrap();
+
+        let flushed_version = proxy_segment.flush(true).unwrap();
+        let wrapped_segment_persisted_version = *wrapped_segment.read().persisted_version.lock();
+        let write_segment_persisted_version = *write_segment.read().persisted_version.lock();
+
+        assert_eq!(wrapped_segment_persisted_version, Some(current_version + 1));
+        assert_eq!(write_segment_persisted_version, Some(current_version + 2));
+        assert_eq!(Some(flushed_version), write_segment_persisted_version);
+
+        // - `wrapped_segment` has unflushed data
+        // - `write_segment` has unflushed data
+        // - `proxy_segment` has in-memory data
+        // - flush `proxy_segment`, ensure:
+        //   - `wrapped_segment` is flushed
+        //   - `write_segment` is flushed
+        //   - `ProxySegment::flush` returns `wrapped_segment`'s persisted version
+
+        let current_version = proxy_segment.version();
+
+        wrapped_segment
+            .write()
+            .upsert_point(
+                current_version + 1,
+                666.into(),
+                only_default_vector(&[6.0, 6.0, 6.0, 0.0]),
+            )
+            .unwrap();
+
+        proxy_segment
+            .upsert_point(
+                current_version + 2,
+                42.into(),
+                only_default_vector(&[0.0, 0.0, 4.0, 2.0]),
+            )
+            .unwrap();
+
+        let flushed_version = proxy_segment.flush(true).unwrap();
+        let wrapped_segment_persisted_version = *wrapped_segment.read().persisted_version.lock();
+        let write_segment_persisted_version = *write_segment.read().persisted_version.lock();
+
+        assert_eq!(wrapped_segment_persisted_version, Some(current_version + 1));
+        assert_eq!(write_segment_persisted_version, Some(current_version + 2));
+        assert_eq!(Some(flushed_version), wrapped_segment_persisted_version);
     }
 }

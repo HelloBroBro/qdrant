@@ -32,7 +32,11 @@ use storage::content_manager::consensus_manager::{ConsensusManager, ConsensusSta
 use storage::content_manager::toc::transfer::ShardTransferDispatcher;
 use storage::content_manager::toc::TableOfContent;
 use storage::dispatcher::Dispatcher;
-#[cfg(not(target_env = "msvc"))]
+use storage::rbac::Access;
+#[cfg(all(
+    not(target_env = "msvc"),
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
 use tikv_jemallocator::Jemalloc;
 
 use crate::common::helpers::{
@@ -47,9 +51,14 @@ use crate::settings::Settings;
 use crate::snapshots::{recover_full_snapshot, recover_snapshots};
 use crate::startup::{remove_started_file_indicator, touch_started_file_indicator};
 
-#[cfg(not(target_env = "msvc"))]
+#[cfg(all(
+    not(target_env = "msvc"),
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
 #[global_allocator]
 static GLOBAL: Jemalloc = Jemalloc;
+
+const FULL_ACCESS: Access = Access::full("For main");
 
 /// Qdrant (read: quadrant ) is a vector similarity search engine.
 /// It provides a production-ready service with a convenient API to store, search, and manage points - vectors with an additional payload.
@@ -97,7 +106,7 @@ struct Args {
     /// Path to an alternative configuration file.
     /// Format: <config_file_path>
     ///
-    /// Default path : config/config.yaml
+    /// Default path: config/config.yaml
     #[arg(long, value_name = "PATH")]
     config_path: Option<String>,
 
@@ -230,6 +239,7 @@ fn main() -> anyhow::Result<()> {
             tls_config,
         ));
         channel_service.id_to_address = persistent_consensus_state.peer_address_by_id.clone();
+        channel_service.id_to_metadata = persistent_consensus_state.peer_metadata_by_id.clone();
     }
 
     // Table of content manages the list of collections.
@@ -249,7 +259,7 @@ fn main() -> anyhow::Result<()> {
 
     // Here we load all stored collections.
     runtime_handle.block_on(async {
-        for collection in toc.all_collections().await {
+        for collection in toc.all_collections(&FULL_ACCESS).await {
             log::debug!("Loaded collection: {collection}");
         }
     });
@@ -335,8 +345,12 @@ fn main() -> anyhow::Result<()> {
         });
 
         let collections_to_recover_in_consensus = if is_new_deployment {
-            let existing_collections = runtime_handle.block_on(toc_arc.all_collections());
+            let existing_collections =
+                runtime_handle.block_on(toc_arc.all_collections(&FULL_ACCESS));
             existing_collections
+                .into_iter()
+                .map(|pass| pass.name().to_string())
+                .collect()
         } else {
             restored_collections
         };

@@ -21,6 +21,9 @@ pub struct VectorParams {
     /// If true - serve vectors from disk. If set to false, the vectors will be loaded in RAM.
     #[prost(bool, optional, tag = "5")]
     pub on_disk: ::core::option::Option<bool>,
+    /// Data type of the vectors
+    #[prost(enumeration = "Datatype", optional, tag = "6")]
+    pub datatype: ::core::option::Option<i32>,
 }
 #[derive(validator::Validate)]
 #[derive(serde::Serialize)]
@@ -925,6 +928,18 @@ pub struct MoveShard {
 #[derive(serde::Serialize)]
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
+pub struct AbortShardTransfer {
+    /// Local shard id
+    #[prost(uint32, tag = "1")]
+    pub shard_id: u32,
+    #[prost(uint64, tag = "2")]
+    pub from_peer_id: u64,
+    #[prost(uint64, tag = "3")]
+    pub to_peer_id: u64,
+}
+#[derive(serde::Serialize)]
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
 pub struct RestartTransfer {
     /// Local shard id
     #[prost(uint32, tag = "1")]
@@ -1003,7 +1018,7 @@ pub mod update_collection_cluster_setup_request {
         #[prost(message, tag = "3")]
         ReplicateShard(super::MoveShard),
         #[prost(message, tag = "4")]
-        AbortTransfer(super::MoveShard),
+        AbortTransfer(super::AbortShardTransfer),
         #[prost(message, tag = "5")]
         DropReplica(super::Replica),
         #[prost(message, tag = "7")]
@@ -1066,6 +1081,36 @@ pub struct DeleteShardKeyResponse {
 #[derive(serde::Serialize)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
 #[repr(i32)]
+pub enum Datatype {
+    Default = 0,
+    Float32 = 1,
+    Uint8 = 2,
+}
+impl Datatype {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Datatype::Default => "Default",
+            Datatype::Float32 => "Float32",
+            Datatype::Uint8 => "Uint8",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "Default" => Some(Self::Default),
+            "Float32" => Some(Self::Float32),
+            "Uint8" => Some(Self::Uint8),
+            _ => None,
+        }
+    }
+}
+#[derive(serde::Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
 pub enum Distance {
     UnknownDistance = 0,
     Cosine = 1,
@@ -1110,6 +1155,8 @@ pub enum CollectionStatus {
     Yellow = 2,
     /// Something went wrong
     Red = 3,
+    /// Optimization is pending
+    Grey = 4,
 }
 impl CollectionStatus {
     /// String value of the enum field names used in the ProtoBuf definition.
@@ -1122,6 +1169,7 @@ impl CollectionStatus {
             CollectionStatus::Green => "Green",
             CollectionStatus::Yellow => "Yellow",
             CollectionStatus::Red => "Red",
+            CollectionStatus::Grey => "Grey",
         }
     }
     /// Creates an enum from field names used in the ProtoBuf definition.
@@ -1131,6 +1179,7 @@ impl CollectionStatus {
             "Green" => Some(Self::Green),
             "Yellow" => Some(Self::Yellow),
             "Red" => Some(Self::Red),
+            "Grey" => Some(Self::Grey),
             _ => None,
         }
     }
@@ -1322,7 +1371,7 @@ pub enum ReplicaState {
     Initializing = 3,
     /// A shard which receives data, but is not used for search; Useful for backup shards
     Listener = 4,
-    /// Snapshot shard transfer is in progress; Updates should not be sent to (and are ignored by) the shard
+    /// Deprecated: snapshot shard transfer is in progress; Updates should not be sent to (and are ignored by) the shard
     PartialSnapshot = 5,
     /// Shard is undergoing recovered by an external node; Normally rejects updates, accepts updates if force is true
     Recovery = 6,
@@ -3619,6 +3668,7 @@ pub struct UpsertPoints {
     #[prost(bool, optional, tag = "2")]
     pub wait: ::core::option::Option<bool>,
     #[prost(message, repeated, tag = "3")]
+    #[validate]
     pub points: ::prost::alloc::vec::Vec<PointStruct>,
     /// Write ordering guarantees
     #[prost(message, optional, tag = "4")]
@@ -5214,6 +5264,7 @@ pub struct PointsIdsList {
     #[prost(message, repeated, tag = "1")]
     pub ids: ::prost::alloc::vec::Vec<PointId>,
 }
+#[derive(validator::Validate)]
 #[derive(serde::Serialize)]
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -5223,6 +5274,7 @@ pub struct PointStruct {
     #[prost(map = "string, message", tag = "3")]
     pub payload: ::std::collections::HashMap<::prost::alloc::string::String, Value>,
     #[prost(message, optional, tag = "4")]
+    #[validate]
     pub vectors: ::core::option::Option<Vectors>,
 }
 #[derive(serde::Serialize)]

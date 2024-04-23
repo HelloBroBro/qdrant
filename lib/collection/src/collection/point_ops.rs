@@ -117,7 +117,9 @@ impl Collection {
         if let Some(result) = result {
             Ok(result)
         } else {
-            Err(CollectionError::service_error(format!(
+            // Special error type needed to handle creation of partial shards
+            // In all other scenarios, equivalent to `service_error`
+            Err(CollectionError::pre_condition_failed(format!(
                 "No target shard {shard_selection} found for update"
             )))
         }
@@ -256,6 +258,9 @@ impl Collection {
             // Needed to return next page offset.
             limit += 1;
         };
+
+        let local_only = shard_selection.is_shard_id();
+
         let retrieved_points: Vec<_> = {
             let shards_holder = self.shards_holder.read().await;
             let target_shards = shards_holder.select_shards(shard_selection)?;
@@ -269,7 +274,7 @@ impl Collection {
                         &with_vector,
                         request.filter.as_ref(),
                         read_consistency,
-                        shard_selection.is_shard_id(),
+                        local_only,
                         order_by.as_ref(),
                     )
                     .and_then(move |mut records| async move {
@@ -293,14 +298,25 @@ impl Collection {
                 .flatten()
                 .sorted_unstable_by_key(|point| point.id)
                 .take(limit)
+                .map(api::rest::Record::from)
                 .collect_vec(),
             Some(order_by) => {
                 retrieved_iter
                     // Extract and remove order value from payload
                     .map(|records| {
                         records.into_iter().map(|mut record| {
-                            let value =
-                                order_by.remove_order_value_from_payload(record.payload.as_mut());
+                            let value;
+                            if local_only {
+                                value =
+                                    order_by.get_order_value_from_payload(record.payload.as_ref());
+                            } else {
+                                value = order_by
+                                    .remove_order_value_from_payload(record.payload.as_mut());
+                                if !with_payload_interface.is_required() {
+                                    // Use None instead of empty hashmap
+                                    record.payload = None;
+                                }
+                            };
                             (value, record)
                         })
                     })
@@ -309,7 +325,7 @@ impl Collection {
                         Direction::Asc => value_a <= value_b,
                         Direction::Desc => value_a >= value_b,
                     })
-                    .map(|(_, record)| record)
+                    .map(|(_, record)| api::rest::Record::from(record))
                     .take(limit)
                     .collect_vec()
             }

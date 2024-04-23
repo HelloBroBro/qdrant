@@ -1,29 +1,15 @@
 use std::convert::Infallible;
 use std::future::{ready, Ready};
+use std::sync::Arc;
 
 use actix_web::body::{BoxBody, EitherBody};
 use actix_web::dev::{forward_ready, Service, ServiceRequest, ServiceResponse, Transform};
-use actix_web::http::Method;
-use actix_web::{Error, FromRequest, HttpMessage as _, HttpResponse};
+use actix_web::{Error, FromRequest, HttpMessage, HttpResponse, ResponseError};
 use futures_util::future::LocalBoxFuture;
-use rbac::jwt::Claims;
+use storage::rbac::Access;
 
-use crate::common::auth::AuthKeys;
-
-/// List of read-only POST request paths. List MUST be sorted.
-const READ_ONLY_POST_PATTERNS: [&str; 11] = [
-    "/collections/{name}/points",
-    "/collections/{name}/points/count",
-    "/collections/{name}/points/discover",
-    "/collections/{name}/points/discover/batch",
-    "/collections/{name}/points/recommend",
-    "/collections/{name}/points/recommend/batch",
-    "/collections/{name}/points/recommend/groups",
-    "/collections/{name}/points/scroll",
-    "/collections/{name}/points/search",
-    "/collections/{name}/points/search/batch",
-    "/collections/{name}/points/search/groups",
-];
+use super::helpers::HttpError;
+use crate::common::auth::{AuthError, AuthKeys};
 
 pub struct Auth {
     auth_keys: AuthKeys,
@@ -41,7 +27,8 @@ impl Auth {
 
 impl<S, B> Transform<S, ServiceRequest> for Auth
 where
-    S: Service<ServiceRequest, Response = ServiceResponse<EitherBody<B, BoxBody>>, Error = Error>,
+    S: Service<ServiceRequest, Response = ServiceResponse<EitherBody<B, BoxBody>>, Error = Error>
+        + 'static,
     S::Future: 'static,
     B: 'static,
 {
@@ -53,9 +40,9 @@ where
 
     fn new_transform(&self, service: S) -> Self::Future {
         ready(Ok(AuthMiddleware {
-            auth_keys: self.auth_keys.clone(),
+            auth_keys: Arc::new(self.auth_keys.clone()),
             whitelist: self.whitelist.clone(),
-            service,
+            service: Arc::new(service),
         }))
     }
 }
@@ -95,10 +82,10 @@ impl PathMode {
 }
 
 pub struct AuthMiddleware<S> {
-    auth_keys: AuthKeys,
+    auth_keys: Arc<AuthKeys>,
     /// List of items whitelisted from authentication.
     whitelist: Vec<WhitelistItem>,
-    service: S,
+    service: Arc<S>,
 }
 
 impl<S> AuthMiddleware<S> {
@@ -109,7 +96,8 @@ impl<S> AuthMiddleware<S> {
 
 impl<S, B> Service<ServiceRequest> for AuthMiddleware<S>
 where
-    S: Service<ServiceRequest, Response = ServiceResponse<EitherBody<B, BoxBody>>, Error = Error>,
+    S: Service<ServiceRequest, Response = ServiceResponse<EitherBody<B, BoxBody>>, Error = Error>
+        + 'static,
     S::Future: 'static,
     B: 'static,
 {
@@ -126,40 +114,37 @@ where
             return Box::pin(self.service.call(req));
         }
 
-        match self.auth_keys.validate_request(
-            |key| req.headers().get(key).and_then(|val| val.to_str().ok()),
-            is_read_only(&req),
-        ) {
-            Ok(claims) => {
-                if let Some(claims) = claims {
-                    let _previous = req.extensions_mut().insert::<Claims>(claims);
+        let auth_keys = self.auth_keys.clone();
+        let service = self.service.clone();
+        Box::pin(async move {
+            match auth_keys
+                .validate_request(|key| req.headers().get(key).and_then(|val| val.to_str().ok()))
+                .await
+            {
+                Ok(access) => {
+                    let _previous = req.extensions_mut().insert::<Access>(access);
                     debug_assert!(
                         _previous.is_none(),
-                        "Previous claims should not exist in the request"
+                        "Previous access object should not exist in the request"
                     );
+                    service.call(req).await
                 }
-                Box::pin(self.service.call(req))
+                Err(e) => {
+                    let resp = match e {
+                        AuthError::Unauthorized(e) => HttpResponse::Unauthorized().body(e),
+                        AuthError::Forbidden(e) => HttpResponse::Forbidden().body(e),
+                        AuthError::StorageError(e) => HttpError::from(e).error_response(),
+                    };
+                    Ok(req.into_response(resp).map_into_right_body())
+                }
             }
-            Err(e) => Box::pin(async move {
-                Ok(req
-                    .into_response(HttpResponse::Forbidden().body(e))
-                    .map_into_right_body())
-            }),
-        }
+        })
     }
 }
 
-pub struct Extension<T> {
-    inner: Option<T>,
-}
+pub struct ActixAccess(pub Access);
 
-impl<T> Extension<T> {
-    pub fn into_inner(self) -> Option<T> {
-        self.inner
-    }
-}
-
-impl<T: 'static> FromRequest for Extension<T> {
+impl FromRequest for ActixAccess {
     type Error = Infallible;
     type Future = Ready<Result<Self, Self::Error>>;
 
@@ -167,37 +152,9 @@ impl<T: 'static> FromRequest for Extension<T> {
         req: &actix_web::HttpRequest,
         _payload: &mut actix_web::dev::Payload,
     ) -> Self::Future {
-        let ext = req.extensions_mut().remove::<T>();
-        ready(Ok(Extension { inner: ext }))
-    }
-}
-
-fn is_read_only(req: &ServiceRequest) -> bool {
-    match *req.method() {
-        Method::GET => true,
-        Method::POST => req
-            .match_pattern()
-            .map(|pattern| {
-                READ_ONLY_POST_PATTERNS
-                    .binary_search(&pattern.as_str())
-                    .is_ok()
-            })
-            .unwrap_or_default(),
-        _ => false,
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn read_only_post_patterns_sorted() {
-        let mut sorted = READ_ONLY_POST_PATTERNS;
-        sorted.sort_unstable();
-        assert_eq!(
-            READ_ONLY_POST_PATTERNS, sorted,
-            "The READ_ONLY_POST_PATTERNS list must be sorted"
-        );
+        let access = req.extensions_mut().remove::<Access>().unwrap_or_else(|| {
+            Access::full("All requests have full by default access when API key is not configured")
+        });
+        ready(Ok(ActixAccess(access)))
     }
 }

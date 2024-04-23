@@ -14,7 +14,7 @@ tracing = ["dep:tracing", "api/tracing", "segment/tracing"]
 [dev-dependencies]
 criterion = "0.5"
 proptest = "1.4.0"
-rstest = "0.18.2"
+rstest = "0.19.0"
 approx = "0.5.1"
 
 [target.'cfg(not(target_os = "windows"))'.dev-dependencies]
@@ -29,10 +29,11 @@ serde = { workspace = true }
 serde_cbor = { workspace = true }
 serde_json = { workspace = true }
 rmp-serde = "~1.1"
-wal = { git = "https://github.com/qdrant/wal.git", rev = "fad0e7c48be58d8e7db4cc739acd9b1cf6735de0" }
+wal = { workspace = true }
 ordered-float = "4.2"
 hashring = "0.3.3"
 tinyvec = { version = "1.6.0", features = ["alloc"] }
+lazy_static = "1.4.0"
 
 tokio = { workspace = true }
 tokio-util = { workspace = true }
@@ -41,12 +42,12 @@ atomicwrites = "0.4.3"
 log = "0.4"
 env_logger = "0.11"
 merge = "0.1.0"
-async-trait = "0.1.78"
-arc-swap = "1.7.0"
+async-trait = "0.1.80"
+arc-swap = "1.7.1"
 tonic = { workspace = true }
 uuid = { workspace = true }
 url = { version = "2", features = ["serde"] }
-validator = { version = "0.16", features = ["derive"] }
+validator = { workspace = true }
 actix-web-validator = "5.0.1"
 
 common = { path = "../common/common" }
@@ -63,14 +64,14 @@ chrono = { workspace = true }
 schemars = { workspace = true }
 tar = "0.4.40"
 fs_extra = "1.3.0"
-semver = "1.0.22"
+semver = { workspace = true }
 tempfile = "3.10.1"
 sha2 = "0.10.8"
-bytes = "1.5.0"
+bytes = "1.6.0"
 fnv = { workspace = true }
 indexmap = { workspace = true }
 ringbuffer = "0.15.0"
-async-recursion = "1.1"
+strum = { workspace = true }
 
 tracing = { workspace = true, optional = true }
 

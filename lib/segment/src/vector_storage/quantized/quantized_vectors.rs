@@ -11,10 +11,12 @@ use serde::{Deserialize, Serialize};
 use super::quantized_scorer_builder::QuantizedScorerBuilder;
 use crate::common::operation_error::{OperationError, OperationResult};
 use crate::common::vector_utils::TrySetCapacityExact;
+use crate::data_types::primitive::PrimitiveVectorElement;
 use crate::data_types::vectors::{QueryVector, VectorElementType};
 use crate::types::{
     BinaryQuantization, BinaryQuantizationConfig, CompressionRatio, Distance, ProductQuantization,
     ProductQuantizationConfig, QuantizationConfig, ScalarQuantization, ScalarQuantizationConfig,
+    VectorStorageDatatype,
 };
 use crate::vector_storage::chunked_vectors::ChunkedVectors;
 use crate::vector_storage::quantized::quantized_mmap_storage::{
@@ -46,6 +48,7 @@ pub struct QuantizedVectors {
     config: QuantizedVectorsConfig,
     path: PathBuf,
     distance: Distance,
+    datatype: VectorStorageDatatype,
 }
 
 impl QuantizedVectors {
@@ -65,11 +68,13 @@ impl QuantizedVectors {
     ) -> OperationResult<Box<dyn RawScorer + 'a>> {
         QuantizedScorerBuilder::new(
             &self.storage_impl,
+            &self.config.quantization_config,
             query,
             point_deleted,
             vec_deleted,
             is_stopped,
             &self.distance,
+            self.datatype,
         )
         .build()
     }
@@ -110,28 +115,48 @@ impl QuantizedVectors {
             VectorStorageEnum::DenseSimple(v) => {
                 Self::create_impl(v, quantization_config, path, max_threads, stopped)
             }
+            VectorStorageEnum::DenseSimpleByte(v) => {
+                Self::create_impl(v, quantization_config, path, max_threads, stopped)
+            }
             VectorStorageEnum::DenseMemmap(v) => {
+                Self::create_impl(v.as_ref(), quantization_config, path, max_threads, stopped)
+            }
+            VectorStorageEnum::DenseMemmapByte(v) => {
                 Self::create_impl(v.as_ref(), quantization_config, path, max_threads, stopped)
             }
             VectorStorageEnum::DenseAppendableMemmap(v) => {
                 Self::create_impl(v.as_ref(), quantization_config, path, max_threads, stopped)
             }
+            VectorStorageEnum::DenseAppendableMemmapByte(v) => {
+                Self::create_impl(v.as_ref(), quantization_config, path, max_threads, stopped)
+            }
             VectorStorageEnum::SparseSimple(_) => Err(OperationError::WrongSparse),
+            VectorStorageEnum::MultiDenseSimple(_v) => Err(OperationError::WrongMulti),
         }
     }
 
-    fn create_impl<TVectorStorage: DenseVectorStorage + Send + Sync>(
+    fn create_impl<
+        TElement: PrimitiveVectorElement,
+        TVectorStorage: DenseVectorStorage<TElement> + Send + Sync,
+    >(
         vector_storage: &TVectorStorage,
         quantization_config: &QuantizationConfig,
         path: &Path,
         max_threads: usize,
         stopped: &AtomicBool,
     ) -> OperationResult<Self> {
-        let count = vector_storage.total_vector_count();
-        let vectors = (0..count as PointOffsetType).map(|i| vector_storage.get_dense(i));
-        let on_disk_vector_storage = vector_storage.is_on_disk();
-        let distance = vector_storage.distance();
         let dim = vector_storage.vector_dim();
+        let count = vector_storage.total_vector_count();
+        let distance = vector_storage.distance();
+        let datatype = vector_storage.datatype();
+        let vectors = (0..count as PointOffsetType).map(|i| {
+            PrimitiveVectorElement::quantization_preprocess(
+                quantization_config,
+                distance,
+                vector_storage.get_dense(i),
+            )
+        });
+        let on_disk_vector_storage = vector_storage.is_on_disk();
 
         let vector_parameters = Self::construct_vector_parameters(distance, dim, count);
 
@@ -179,6 +204,7 @@ impl QuantizedVectors {
             config: quantized_vectors_config,
             path: path.to_path_buf(),
             distance,
+            datatype,
         };
 
         quantized_vectors.save_to(path)?;
@@ -193,6 +219,7 @@ impl QuantizedVectors {
     pub fn load(vector_storage: &VectorStorageEnum, path: &Path) -> OperationResult<Self> {
         let on_disk_vector_storage = vector_storage.is_on_disk();
         let distance = vector_storage.distance();
+        let datatype = vector_storage.datatype();
 
         let data_path = path.join(QUANTIZED_DATA_PATH);
         let meta_path = path.join(QUANTIZED_META_PATH);
@@ -257,11 +284,12 @@ impl QuantizedVectors {
             config,
             path: path.to_path_buf(),
             distance,
+            datatype,
         })
     }
 
     fn create_scalar<'a>(
-        vectors: impl Iterator<Item = &'a [VectorElementType]> + Clone,
+        vectors: impl Iterator<Item = impl AsRef<[VectorElementType]> + 'a> + Clone,
         vector_parameters: &quantization::VectorParameters,
         scalar_config: &ScalarQuantizationConfig,
         path: &Path,
@@ -301,7 +329,7 @@ impl QuantizedVectors {
     }
 
     fn create_pq<'a>(
-        vectors: impl Iterator<Item = &'a [VectorElementType]> + Clone + Send,
+        vectors: impl Iterator<Item = impl AsRef<[VectorElementType]> + 'a> + Clone + Send,
         vector_parameters: &quantization::VectorParameters,
         pq_config: &ProductQuantizationConfig,
         path: &Path,
@@ -346,7 +374,7 @@ impl QuantizedVectors {
     }
 
     fn create_binary<'a>(
-        vectors: impl Iterator<Item = &'a [VectorElementType]> + Clone,
+        vectors: impl Iterator<Item = impl AsRef<[VectorElementType]> + 'a> + Clone,
         vector_parameters: &quantization::VectorParameters,
         binary_config: &BinaryQuantizationConfig,
         path: &Path,

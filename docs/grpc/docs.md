@@ -4,6 +4,7 @@
 ## Table of Contents
 
 - [collections.proto](#collections-proto)
+    - [AbortShardTransfer](#qdrant-AbortShardTransfer)
     - [AliasDescription](#qdrant-AliasDescription)
     - [AliasOperations](#qdrant-AliasOperations)
     - [BinaryQuantization](#qdrant-BinaryQuantization)
@@ -76,6 +77,7 @@
   
     - [CollectionStatus](#qdrant-CollectionStatus)
     - [CompressionRatio](#qdrant-CompressionRatio)
+    - [Datatype](#qdrant-Datatype)
     - [Distance](#qdrant-Distance)
     - [PayloadSchemaType](#qdrant-PayloadSchemaType)
     - [QuantizationType](#qdrant-QuantizationType)
@@ -252,6 +254,23 @@
 <p align="right"><a href="#top">Top</a></p>
 
 ## collections.proto
+
+
+
+<a name="qdrant-AbortShardTransfer"></a>
+
+### AbortShardTransfer
+
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| shard_id | [uint32](#uint32) |  | Local shard id |
+| from_peer_id | [uint64](#uint64) |  |  |
+| to_peer_id | [uint64](#uint64) |  |  |
+
+
+
 
 
 
@@ -1251,7 +1270,7 @@ Note: 1kB = 1 vector of size 256. |
 | collection_name | [string](#string) |  | Name of the collection |
 | move_shard | [MoveShard](#qdrant-MoveShard) |  |  |
 | replicate_shard | [MoveShard](#qdrant-MoveShard) |  |  |
-| abort_transfer | [MoveShard](#qdrant-MoveShard) |  |  |
+| abort_transfer | [AbortShardTransfer](#qdrant-AbortShardTransfer) |  |  |
 | drop_replica | [Replica](#qdrant-Replica) |  |  |
 | create_shard_key | [CreateShardKey](#qdrant-CreateShardKey) |  |  |
 | delete_shard_key | [DeleteShardKey](#qdrant-DeleteShardKey) |  |  |
@@ -1291,6 +1310,7 @@ Note: 1kB = 1 vector of size 256. |
 | hnsw_config | [HnswConfigDiff](#qdrant-HnswConfigDiff) | optional | Configuration of vector HNSW graph. If omitted - the collection configuration will be used |
 | quantization_config | [QuantizationConfig](#qdrant-QuantizationConfig) | optional | Configuration of vector quantization config. If omitted - the collection configuration will be used |
 | on_disk | [bool](#bool) | optional | If true - serve vectors from disk. If set to false, the vectors will be loaded in RAM. |
+| datatype | [Datatype](#qdrant-Datatype) | optional | Data type of the vectors |
 
 
 
@@ -1437,6 +1457,7 @@ Note: 1kB = 1 vector of size 256. |
 | Green | 1 | All segments are ready |
 | Yellow | 2 | Optimization in process |
 | Red | 3 | Something went wrong |
+| Grey | 4 | Optimization is pending |
 
 
 
@@ -1452,6 +1473,19 @@ Note: 1kB = 1 vector of size 256. |
 | x16 | 2 |  |
 | x32 | 3 |  |
 | x64 | 4 |  |
+
+
+
+<a name="qdrant-Datatype"></a>
+
+### Datatype
+
+
+| Name | Number | Description |
+| ---- | ------ | ----------- |
+| Default | 0 |  |
+| Float32 | 1 |  |
+| Uint8 | 2 |  |
 
 
 
@@ -1512,7 +1546,7 @@ Note: 1kB = 1 vector of size 256. |
 | Partial | 2 | The shard is partially loaded and is currently receiving data from other shards |
 | Initializing | 3 | Collection is being created |
 | Listener | 4 | A shard which receives data, but is not used for search; Useful for backup shards |
-| PartialSnapshot | 5 | Snapshot shard transfer is in progress; Updates should not be sent to (and are ignored by) the shard |
+| PartialSnapshot | 5 | Deprecated: snapshot shard transfer is in progress; Updates should not be sent to (and are ignored by) the shard |
 | Recovery | 6 | Shard is undergoing recovered by an external node; Normally rejects updates, accepts updates if force is true |
 
 

@@ -148,7 +148,7 @@ storage:
 
   # Default shard transfer method to use if none is defined.
   # If null - don't have a shard transfer preference, choose automatically.
-  # If stream_records or snapshot - prefer this specific method.
+  # If stream_records, snapshot or wal_delta - prefer this specific method.
   # More info: https://qdrant.tech/documentation/guides/distributed_deployment/#shard-transfer-method
   shard_transfer_method: null
 
@@ -204,6 +204,12 @@ service:
   #
   # Uncomment to enable.
   # read_only_api_key: your_secret_read_only_api_key_here
+
+  # Uncomment to enable JWT Role Based Access Control (RBAC).
+  # If enabled, you can generate JWT tokens with fine-grained rules for access control.
+  # Use generated token instead of API key.
+  #
+  # jwt_rbac: true
 
 cluster:
   # Use `enabled: true` to run Qdrant in distributed deployment mode

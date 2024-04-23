@@ -37,7 +37,7 @@ use crate::shards::shard::{PeerId, ShardId};
 use crate::shards::shard_holder::{shard_not_found_error, LockedShardHolder, ShardHolder};
 use crate::shards::transfer::helpers::check_transfer_conflicts_strict;
 use crate::shards::transfer::transfer_tasks_pool::{TaskResult, TransferTasksPool};
-use crate::shards::transfer::ShardTransfer;
+use crate::shards::transfer::{ShardTransfer, ShardTransferMethod};
 use crate::shards::{replica_set, CollectionId};
 use crate::telemetry::CollectionTelemetry;
 
@@ -54,7 +54,6 @@ pub struct Collection {
     channel_service: ChannelService,
     transfer_tasks: Mutex<TransferTasksPool>,
     request_shard_transfer_cb: RequestShardTransfer,
-    #[allow(dead_code)] //Might be useful in case of repartition implementation
     notify_peer_failure_cb: ChangePeerState,
     abort_shard_transfer_cb: replica_set::AbortShardTransfer,
     init_time: Duration,
@@ -376,7 +375,7 @@ impl Collection {
             // Terminate transfer if source or target replicas are now dead
             let related_transfers = shard_holder.get_related_transfers(&shard_id, &peer_id);
             for transfer in related_transfers {
-                self._abort_shard_transfer(transfer.key(), &shard_holder)
+                self.abort_shard_transfer(transfer.key(), Some(&shard_holder))
                     .await?;
             }
         }
@@ -563,6 +562,22 @@ impl Collection {
                 continue;
             }
 
+            // Select shard transfer method, prefer user configured method or choose one now
+            // If all peers are 1.8+, we try WAL delta transfer, otherwise we use the default method
+            let shard_transfer_method = self
+                .shared_storage_config
+                .default_shard_transfer_method
+                .unwrap_or_else(|| {
+                    let all_support_wal_delta = self
+                        .channel_service
+                        .all_peers_at_version(Version::new(1, 8, 0));
+                    if all_support_wal_delta {
+                        ShardTransferMethod::WalDelta
+                    } else {
+                        ShardTransferMethod::default()
+                    }
+                });
+
             // Try to find a replica to transfer from
             for replica_id in replica_set.active_remote_shards().await {
                 let transfer = ShardTransfer {
@@ -571,11 +586,7 @@ impl Collection {
                     shard_id,
                     sync: true,
                     // For automatic shard transfers, always select some default method from this point on
-                    method: Some(
-                        self.shared_storage_config
-                            .default_shard_transfer_method
-                            .unwrap_or_default(),
-                    ),
+                    method: Some(shard_transfer_method),
                 };
 
                 if check_transfer_conflicts_strict(&transfer, transfers.iter()).is_some() {

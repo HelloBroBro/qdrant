@@ -19,6 +19,7 @@ use actix_web::{error, get, web, App, HttpRequest, HttpResponse, HttpServer, Res
 use actix_web_extras::middleware::Condition as ConditionEx;
 use collection::operations::validation;
 use storage::dispatcher::Dispatcher;
+use storage::rbac::Access;
 
 use crate::actix::api::cluster_api::config_cluster_api;
 use crate::actix::api::collections_api::config_collections_api;
@@ -54,7 +55,14 @@ pub fn init(
     settings: Settings,
 ) -> io::Result<()> {
     actix_web::rt::System::new().block_on(async {
-        let toc_data = web::Data::from(dispatcher.toc().clone());
+        let auth_keys = AuthKeys::try_create(
+            &settings.service,
+            dispatcher.toc(&Access::full("For JWT validation")).clone(),
+        );
+        let upload_dir = dispatcher
+            .toc(&Access::full("For upload dir"))
+            .upload_dir()
+            .unwrap();
         let dispatcher_data = web::Data::from(dispatcher);
         let actix_telemetry_collector = telemetry_collector
             .lock()
@@ -64,7 +72,6 @@ pub fn init(
         let telemetry_collector_data = web::Data::from(telemetry_collector);
         let http_client = web::Data::new(HttpClient::from_settings(&settings)?);
         let health_checker = web::Data::new(health_checker);
-        let auth_keys = AuthKeys::try_create(&settings.service);
         let static_folder = settings
             .service
             .static_content_dir
@@ -101,8 +108,6 @@ pub fn init(
             api_key_whitelist.push(WhitelistItem::prefix(WEB_UI_PATH));
         }
 
-        let upload_dir = dispatcher_data.upload_dir().unwrap();
-
         let mut server = HttpServer::new(move || {
             let cors = Cors::default()
                 .allow_any_origin()
@@ -138,7 +143,6 @@ pub fn init(
                     actix_telemetry_collector.clone(),
                 ))
                 .app_data(dispatcher_data.clone())
-                .app_data(toc_data.clone())
                 .app_data(telemetry_collector_data.clone())
                 .app_data(http_client.clone())
                 .app_data(health_checker.clone())

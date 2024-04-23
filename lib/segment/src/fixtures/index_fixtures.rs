@@ -13,7 +13,7 @@ use crate::data_types::named_vectors::CowVector;
 use crate::data_types::vectors::{DenseVector, VectorElementType, VectorRef};
 use crate::payload_storage::FilterContext;
 use crate::spaces::metric::Metric;
-use crate::types::Distance;
+use crate::types::{Distance, VectorStorageDatatype};
 use crate::vector_storage::chunked_vectors::ChunkedVectors;
 use crate::vector_storage::{
     raw_scorer_impl, DenseVectorStorage, RawScorer, VectorStorage, VectorStorageEnum,
@@ -32,26 +32,32 @@ impl FilterContext for FakeFilterContext {
     }
 }
 
-pub struct TestRawScorerProducer<TMetric: Metric> {
+pub struct TestRawScorerProducer<TMetric: Metric<VectorElementType>> {
     pub vectors: ChunkedVectors<VectorElementType>,
     pub deleted_points: BitVec,
     pub deleted_vectors: BitVec,
     pub metric: PhantomData<TMetric>,
 }
 
-impl<TMetric: Metric> DenseVectorStorage for TestRawScorerProducer<TMetric> {
+impl<TMetric: Metric<VectorElementType>> DenseVectorStorage<VectorElementType>
+    for TestRawScorerProducer<TMetric>
+{
     fn get_dense(&self, key: PointOffsetType) -> &[VectorElementType] {
         self.vectors.get(key)
     }
 }
 
-impl<TMetric: Metric> VectorStorage for TestRawScorerProducer<TMetric> {
+impl<TMetric: Metric<VectorElementType>> VectorStorage for TestRawScorerProducer<TMetric> {
     fn vector_dim(&self) -> usize {
         self.vectors.get(0).len()
     }
 
     fn distance(&self) -> Distance {
         TMetric::distance()
+    }
+
+    fn datatype(&self) -> VectorStorageDatatype {
+        VectorStorageDatatype::Float32
     }
 
     fn is_on_disk(&self) -> bool {
@@ -107,7 +113,7 @@ impl<TMetric: Metric> VectorStorage for TestRawScorerProducer<TMetric> {
 
 impl<TMetric> TestRawScorerProducer<TMetric>
 where
-    TMetric: Metric,
+    TMetric: Metric<VectorElementType>,
 {
     pub fn new<R>(dim: usize, num_vectors: usize, rng: &mut R) -> Self
     where

@@ -21,13 +21,12 @@ use crate::common::operation_error::OperationError::TypeInferenceError;
 use crate::common::operation_error::{
     get_service_error, OperationError, OperationResult, SegmentFailedState,
 };
+use crate::common::validate_snapshot_archive::open_snapshot_archive_with_validation;
 use crate::common::version::{StorageVersion, VERSION_FILE};
-use crate::common::{
-    check_named_vectors, check_query_vectors, check_stopped, check_vector, check_vector_name,
-};
+use crate::common::{check_named_vectors, check_query_vectors, check_stopped, check_vector_name};
 use crate::data_types::named_vectors::NamedVectors;
 use crate::data_types::order_by::{Direction, OrderBy, OrderingValue};
-use crate::data_types::vectors::{QueryVector, Vector};
+use crate::data_types::vectors::{MultiDenseVector, QueryVector, Vector, VectorRef};
 use crate::entry::entry_point::SegmentEntry;
 use crate::id_tracker::IdTrackerSS;
 use crate::index::field_index::numeric_index::StreamRange;
@@ -211,15 +210,24 @@ impl Segment {
             match vector_opt {
                 None => {
                     let dim = vector_storage.vector_dim();
-                    let vector: Vector = match *vector_storage {
+                    // placeholder vector for marking deletion
+                    let vector = match *vector_storage {
                         VectorStorageEnum::DenseSimple(_)
+                        | VectorStorageEnum::DenseSimpleByte(_)
                         | VectorStorageEnum::DenseMemmap(_)
-                        | VectorStorageEnum::DenseAppendableMemmap(_) => vec![1.0; dim].into(),
-                        VectorStorageEnum::SparseSimple(_) => SparseVector::default().into(),
+                        | VectorStorageEnum::DenseMemmapByte(_)
+                        | VectorStorageEnum::DenseAppendableMemmap(_)
+                        | VectorStorageEnum::DenseAppendableMemmapByte(_) => {
+                            Vector::from(vec![1.0; dim])
+                        }
+                        VectorStorageEnum::SparseSimple(_) => Vector::from(SparseVector::default()),
+                        VectorStorageEnum::MultiDenseSimple(_) => {
+                            Vector::from(MultiDenseVector::placeholder(dim))
+                        }
                     };
-                    vector_storage.insert_vector(new_index, vector.to_vec_ref())?;
+                    vector_storage.insert_vector(new_index, VectorRef::from(&vector))?;
                     vector_storage.delete_vector(new_index)?;
-                    vector_index.update_vector(new_index, vector.to_vec_ref())?;
+                    vector_index.update_vector(new_index, VectorRef::from(&vector))?;
                 }
                 Some(vec) => {
                     vector_storage.insert_vector(new_index, vec)?;
@@ -231,23 +239,73 @@ impl Segment {
         Ok(new_index)
     }
 
-    /// Operation wrapped, which handles previous and new errors in the segment,
-    /// automatically updates versions and skips operations if version is too old
+    /// Operation wrapped, which handles previous and new errors in the segment, automatically
+    /// updates versions and skips operations if the segment version is too old
     ///
     /// # Arguments
     ///
     /// * `op_num` - sequential operation of the current operation
-    /// * `op_point_offset` - if operation is point-related, specify this point offset.
-    ///     If point offset is specified, handler will use point version for comparison.
-    ///     Otherwise, it will use global storage version
     /// * `op` - operation to be wrapped. Should return `OperationResult` of bool (which is returned outside)
     ///     and optionally new offset of the changed point.
     ///
     /// # Result
     ///
     /// Propagates `OperationResult` of bool (which is returned in the `op` closure)
+    fn handle_segment_version_and_failure<F>(
+        &mut self,
+        op_num: SeqNumberType,
+        operation: F,
+    ) -> OperationResult<bool>
+    where
+        F: FnOnce(&mut Segment) -> OperationResult<bool>,
+    {
+        if let Some(SegmentFailedState {
+            version: failed_version,
+            point_id: _failed_point_id,
+            error,
+        }) = &self.error_status
+        {
+            // Failed operations should not be skipped,
+            // fail if newer operation is attempted before proper recovery
+            if *failed_version < op_num {
+                return Err(OperationError::service_error(format!(
+                    "Not recovered from previous error: {error}"
+                )));
+            } // else: Re-try operation
+        }
+
+        let res = self.handle_segment_version(op_num, operation);
+
+        if let Some(error) = get_service_error(&res) {
+            // ToDo: Recover previous segment state
+            log::error!(
+                "Segment {:?} operation error: {error}",
+                self.current_path.as_path(),
+            );
+            self.error_status = Some(SegmentFailedState {
+                version: op_num,
+                point_id: None,
+                error,
+            });
+        }
+        res
+    }
+
+    /// Operation wrapped, which handles previous and new errors in the segment, automatically
+    /// updates versions and skips operations if the point version is too old
     ///
-    fn handle_version_and_failure<F>(
+    /// # Arguments
+    ///
+    /// * `op_num` - sequential operation of the current operation
+    /// * `op_point_offset` - If point offset is specified, handler will use point version for comparison.
+    ///     Otherwise, it will be applied without version checks.
+    /// * `op` - operation to be wrapped. Should return `OperationResult` of bool (which is returned outside)
+    ///     and optionally new offset of the changed point.
+    ///
+    /// # Result
+    ///
+    /// Propagates `OperationResult` of bool (which is returned in the `op` closure)
+    fn handle_point_version_and_failure<F>(
         &mut self,
         op_num: SeqNumberType,
         op_point_offset: Option<PointOffsetType>,
@@ -271,7 +329,7 @@ impl Segment {
             } // else: Re-try operation
         }
 
-        let res = self.handle_version(op_num, op_point_offset, operation);
+        let res = self.handle_point_version(op_num, op_point_offset, operation);
 
         match get_service_error(&res) {
             None => {
@@ -293,9 +351,8 @@ impl Segment {
             Some(error) => {
                 // ToDo: Recover previous segment state
                 log::error!(
-                    "Segment {:?} operation error: {}",
+                    "Segment {:?} operation error: {error}",
                     self.current_path.as_path(),
-                    error
                 );
                 let point_id = op_point_offset
                     .and_then(|point_offset| self.id_tracker.borrow().external_id(point_offset));
@@ -309,10 +366,33 @@ impl Segment {
         res
     }
 
-    /// Manage segment version checking
+    /// Manage segment version checking, for segment level operations
+    ///
     /// If current version if higher than operation version - do not perform the operation
     /// Update current version if operation successfully executed
-    fn handle_version<F>(
+    fn handle_segment_version<F>(
+        &mut self,
+        op_num: SeqNumberType,
+        operation: F,
+    ) -> OperationResult<bool>
+    where
+        F: FnOnce(&mut Segment) -> OperationResult<bool>,
+    {
+        // Global version to check if operation has already been applied, then skip without execution
+        if self.version.unwrap_or(0) > op_num {
+            return Ok(false);
+        }
+
+        let applied = operation(self)?;
+        self.bump_segment_version(op_num);
+        Ok(applied)
+    }
+
+    /// Manage point version checking inside this segment, for point level operations
+    ///
+    /// If current version if higher than operation version - do not perform the operation
+    /// Update current version if operation successfully executed
+    fn handle_point_version<F>(
         &mut self,
         op_num: SeqNumberType,
         op_point_offset: Option<PointOffsetType>,
@@ -321,31 +401,21 @@ impl Segment {
     where
         F: FnOnce(&mut Segment) -> OperationResult<(bool, Option<PointOffsetType>)>,
     {
-        match op_point_offset {
-            None => {
-                // Not a point operation *or* point does not exist.
-                // Use global version to check if operation has been already applied.
-                if self.version.unwrap_or(0) > op_num {
-                    return Ok(false); // Skip without execution
-                }
-            }
-            Some(point_offset) => {
-                // Check if point not exists or have lower version
-                if self
-                    .id_tracker
-                    .borrow()
-                    .internal_version(point_offset)
-                    .map_or(false, |current_version| current_version > op_num)
-                {
-                    return Ok(false);
-                }
+        // Check if point not exists or have lower version
+        if let Some(point_offset) = op_point_offset {
+            if self
+                .id_tracker
+                .borrow()
+                .internal_version(point_offset)
+                .map_or(false, |current_version| current_version > op_num)
+            {
+                return Ok(false);
             }
         }
 
         let (applied, point_id) = operation(self)?;
 
-        self.version = Some(max(op_num, self.version.unwrap_or(0)));
-
+        self.bump_segment_version(op_num);
         if let Some(point_id) = point_id {
             self.id_tracker
                 .borrow_mut()
@@ -353,6 +423,10 @@ impl Segment {
         }
 
         Ok(applied)
+    }
+
+    fn bump_segment_version(&mut self, op_num: SeqNumberType) {
+        self.version = Some(max(op_num, self.version.unwrap_or(0)));
     }
 
     fn lookup_internal_id(&self, point_id: PointIdType) -> OperationResult<PointOffsetType> {
@@ -442,7 +516,7 @@ impl Segment {
                 let vector = vector_storage
                     .get_vector(point_offset)
                     .as_vec_ref()
-                    .to_vec();
+                    .to_owned();
                 vectors.insert(vector_name.clone(), vector);
             }
         }
@@ -470,19 +544,13 @@ impl Segment {
     pub fn restore_snapshot(snapshot_path: &Path, segment_id: &str) -> OperationResult<()> {
         let segment_path = snapshot_path.parent().unwrap().join(segment_id);
 
-        let archive_file = File::open(snapshot_path).map_err(|err| {
+        let mut archive = open_snapshot_archive_with_validation(snapshot_path)?;
+
+        archive.unpack(&segment_path).map_err(|err| {
             OperationError::service_error(format!(
-                "failed to open segment snapshot archive {snapshot_path:?}: {err}"
+                "failed to unpack segment snapshot archive {snapshot_path:?}: {err}"
             ))
         })?;
-
-        tar::Archive::new(archive_file)
-            .unpack(&segment_path)
-            .map_err(|err| {
-                OperationError::service_error(format!(
-                    "failed to unpack segment snapshot archive {snapshot_path:?}: {err}"
-                ))
-            })?;
 
         let snapshot_path = segment_path.join(SNAPSHOT_PATH);
 
@@ -900,6 +968,33 @@ impl Segment {
             ))
             .spawn(move || tasks.iter().for_each(mmap_ops::PrefaultMmapPages::exec));
     }
+
+    /// This function is a simplified version of `search_batch` intended for testing purposes.
+    #[allow(clippy::too_many_arguments)]
+    pub fn search(
+        &self,
+        vector_name: &str,
+        vector: &QueryVector,
+        with_payload: &WithPayload,
+        with_vector: &WithVector,
+        filter: Option<&Filter>,
+        top: usize,
+        params: Option<&SearchParams>,
+    ) -> OperationResult<Vec<ScoredPoint>> {
+        let result = self.search_batch(
+            vector_name,
+            &[vector],
+            with_payload,
+            with_vector,
+            filter,
+            top,
+            params,
+            &false.into(),
+            usize::MAX,
+        )?;
+
+        Ok(result.into_iter().next().unwrap())
+    }
 }
 
 /// This is a basic implementation of `SegmentEntry`,
@@ -916,31 +1011,6 @@ impl SegmentEntry for Segment {
             .and_then(|internal_id| id_tracker.internal_version(internal_id))
     }
 
-    fn search(
-        &self,
-        vector_name: &str,
-        vector: &QueryVector,
-        with_payload: &WithPayload,
-        with_vector: &WithVector,
-        filter: Option<&Filter>,
-        top: usize,
-        params: Option<&SearchParams>,
-        is_stopped: &AtomicBool,
-    ) -> OperationResult<Vec<ScoredPoint>> {
-        check_vector(vector_name, vector, &self.segment_config)?;
-        let vector_data = &self.vector_data[vector_name];
-        let internal_result = &vector_data.vector_index.borrow().search(
-            &[vector],
-            filter,
-            top,
-            params,
-            is_stopped,
-        )?[0];
-
-        check_stopped(is_stopped)?;
-        self.process_search_result(internal_result, with_payload, with_vector)
-    }
-
     fn search_batch(
         &self,
         vector_name: &str,
@@ -951,6 +1021,7 @@ impl SegmentEntry for Segment {
         top: usize,
         params: Option<&SearchParams>,
         is_stopped: &AtomicBool,
+        search_optimized_threshold_kb: usize,
     ) -> OperationResult<Vec<Vec<ScoredPoint>>> {
         check_query_vectors(vector_name, query_vectors, &self.segment_config)?;
         let vector_data = &self.vector_data[vector_name];
@@ -960,6 +1031,7 @@ impl SegmentEntry for Segment {
             top,
             params,
             is_stopped,
+            search_optimized_threshold_kb,
         )?;
 
         check_stopped(is_stopped)?;
@@ -982,9 +1054,9 @@ impl SegmentEntry for Segment {
     ) -> OperationResult<bool> {
         debug_assert!(self.is_appendable());
         check_named_vectors(&vectors, &self.segment_config)?;
-        vectors.preprocess(|name| self.segment_config.distance(name).unwrap());
+        vectors.preprocess(|name| self.config().vector_data.get(name).unwrap());
         let stored_internal_point = self.id_tracker.borrow().internal_id(point_id);
-        self.handle_version_and_failure(op_num, stored_internal_point, |segment| {
+        self.handle_point_version_and_failure(op_num, stored_internal_point, |segment| {
             if let Some(existing_internal_id) = stored_internal_point {
                 segment.replace_all_vectors(existing_internal_id, vectors)?;
                 Ok((true, Some(existing_internal_id)))
@@ -1005,7 +1077,7 @@ impl SegmentEntry for Segment {
             // Point does already not exist anymore
             None => Ok(false),
             Some(internal_id) => {
-                self.handle_version_and_failure(op_num, Some(internal_id), |segment| {
+                self.handle_point_version_and_failure(op_num, Some(internal_id), |segment| {
                     // Mark point as deleted, drop mapping
                     segment.payload_index.borrow_mut().drop(internal_id)?;
                     segment.id_tracker.borrow_mut().drop(point_id)?;
@@ -1035,14 +1107,14 @@ impl SegmentEntry for Segment {
         mut vectors: NamedVectors,
     ) -> OperationResult<bool> {
         check_named_vectors(&vectors, &self.segment_config)?;
-        vectors.preprocess(|name| self.segment_config.distance(name).unwrap());
+        vectors.preprocess(|name| self.config().vector_data.get(name).unwrap());
         let internal_id = self.id_tracker.borrow().internal_id(point_id);
         match internal_id {
             None => Err(OperationError::PointIdError {
                 missed_point_id: point_id,
             }),
             Some(internal_id) => {
-                self.handle_version_and_failure(op_num, Some(internal_id), |segment| {
+                self.handle_point_version_and_failure(op_num, Some(internal_id), |segment| {
                     segment.update_vectors(internal_id, vectors)?;
                     Ok((true, Some(internal_id)))
                 })
@@ -1063,7 +1135,7 @@ impl SegmentEntry for Segment {
                 missed_point_id: point_id,
             }),
             Some(internal_id) => {
-                self.handle_version_and_failure(op_num, Some(internal_id), |segment| {
+                self.handle_point_version_and_failure(op_num, Some(internal_id), |segment| {
                     let vector_data = segment.vector_data.get(vector_name).ok_or(
                         OperationError::VectorNameNotExists {
                             received_name: vector_name.to_string(),
@@ -1084,7 +1156,7 @@ impl SegmentEntry for Segment {
         full_payload: &Payload,
     ) -> OperationResult<bool> {
         let internal_id = self.id_tracker.borrow().internal_id(point_id);
-        self.handle_version_and_failure(op_num, internal_id, |segment| match internal_id {
+        self.handle_point_version_and_failure(op_num, internal_id, |segment| match internal_id {
             Some(internal_id) => {
                 segment
                     .payload_index
@@ -1106,7 +1178,7 @@ impl SegmentEntry for Segment {
         key: &Option<JsonPath>,
     ) -> OperationResult<bool> {
         let internal_id = self.id_tracker.borrow().internal_id(point_id);
-        self.handle_version_and_failure(op_num, internal_id, |segment| match internal_id {
+        self.handle_point_version_and_failure(op_num, internal_id, |segment| match internal_id {
             Some(internal_id) => {
                 segment
                     .payload_index
@@ -1127,7 +1199,7 @@ impl SegmentEntry for Segment {
         key: PayloadKeyTypeRef,
     ) -> OperationResult<bool> {
         let internal_id = self.id_tracker.borrow().internal_id(point_id);
-        self.handle_version_and_failure(op_num, internal_id, |segment| match internal_id {
+        self.handle_point_version_and_failure(op_num, internal_id, |segment| match internal_id {
             Some(internal_id) => {
                 segment
                     .payload_index
@@ -1147,7 +1219,7 @@ impl SegmentEntry for Segment {
         point_id: PointIdType,
     ) -> OperationResult<bool> {
         let internal_id = self.id_tracker.borrow().internal_id(point_id);
-        self.handle_version_and_failure(op_num, internal_id, |segment| match internal_id {
+        self.handle_point_version_and_failure(op_num, internal_id, |segment| match internal_id {
             Some(internal_id) => {
                 segment.payload_index.borrow_mut().drop(internal_id)?;
                 Ok((true, Some(internal_id)))
@@ -1480,9 +1552,9 @@ impl SegmentEntry for Segment {
     }
 
     fn delete_field_index(&mut self, op_num: u64, key: PayloadKeyTypeRef) -> OperationResult<bool> {
-        self.handle_version_and_failure(op_num, None, |segment| {
+        self.handle_segment_version_and_failure(op_num, |segment| {
             segment.payload_index.borrow_mut().drop_index(key)?;
-            Ok((true, None))
+            Ok(true)
         })
     }
 
@@ -1492,13 +1564,13 @@ impl SegmentEntry for Segment {
         key: PayloadKeyTypeRef,
         field_type: Option<&PayloadFieldSchema>,
     ) -> OperationResult<bool> {
-        self.handle_version_and_failure(op_num, None, |segment| match field_type {
+        self.handle_segment_version_and_failure(op_num, |segment| match field_type {
             Some(schema) => {
                 segment
                     .payload_index
                     .borrow_mut()
                     .set_indexed(key, schema.clone())?;
-                Ok((true, None))
+                Ok(true)
             }
             None => match segment.infer_from_payload_data(key)? {
                 None => Err(TypeInferenceError {
@@ -1509,7 +1581,7 @@ impl SegmentEntry for Segment {
                         .payload_index
                         .borrow_mut()
                         .set_indexed(key, schema_type.into())?;
-                    Ok((true, None))
+                    Ok(true)
                 }
             },
         })
@@ -1719,6 +1791,7 @@ mod tests {
     use tempfile::Builder;
 
     use super::*;
+    use crate::common::check_vector;
     use crate::common::operation_error::OperationError::PointIdError;
     use crate::data_types::vectors::{only_default_vector, DEFAULT_VECTOR_NAME};
     use crate::segment_constructor::{build_segment, load_segment};
@@ -1771,6 +1844,8 @@ mod tests {
                     storage_type: VectorStorageType::Memory,
                     index: Indexes::Plain {},
                     quantization_config: None,
+                    multi_vec_config: None,
+                    datatype: None,
                 },
             )]),
             sparse_vector_data: Default::default(),
@@ -1798,7 +1873,6 @@ mod tests {
                 None,
                 10,
                 None,
-                &false.into(),
             )
             .unwrap();
         eprintln!("search_result = {search_result:#?}");
@@ -1813,6 +1887,7 @@ mod tests {
                 10,
                 None,
                 &false.into(),
+                10_000,
             )
             .unwrap();
         eprintln!("search_batch_result = {search_batch_result:#?}");
@@ -1844,6 +1919,8 @@ mod tests {
                     storage_type: VectorStorageType::Memory,
                     index: Indexes::Plain {},
                     quantization_config: None,
+                    multi_vec_config: None,
+                    datatype: None,
                 },
             )]),
             sparse_vector_data: Default::default(),
@@ -1894,7 +1971,6 @@ mod tests {
                 Some(&filter_valid),
                 1,
                 None,
-                &false.into(),
             )
             .unwrap();
         assert_eq!(results_with_valid_filter.len(), 1);
@@ -1908,7 +1984,6 @@ mod tests {
                 Some(&filter_invalid),
                 1,
                 None,
-                &false.into(),
             )
             .unwrap();
         assert!(results_with_invalid_filter.is_empty());
@@ -1936,6 +2011,8 @@ mod tests {
                     storage_type: VectorStorageType::Memory,
                     index: Indexes::Plain {},
                     quantization_config: None,
+                    multi_vec_config: None,
+                    datatype: None,
                 },
             )]),
             sparse_vector_data: Default::default(),
@@ -2031,6 +2108,8 @@ mod tests {
                     storage_type: VectorStorageType::Memory,
                     index: Indexes::Plain {},
                     quantization_config: None,
+                    multi_vec_config: None,
+                    datatype: None,
                 },
             )]),
             sparse_vector_data: Default::default(),
@@ -2063,6 +2142,8 @@ mod tests {
                     storage_type: VectorStorageType::Memory,
                     index: Indexes::Plain {},
                     quantization_config: None,
+                    multi_vec_config: None,
+                    datatype: None,
                 },
             )]),
             sparse_vector_data: Default::default(),
@@ -2092,7 +2173,6 @@ mod tests {
                 None,
                 10,
                 None,
-                &false.into(),
             )
             .unwrap();
 
@@ -2116,7 +2196,6 @@ mod tests {
                 None,
                 10,
                 None,
-                &false.into(),
             )
             .unwrap();
 
@@ -2158,6 +2237,8 @@ mod tests {
                     storage_type: VectorStorageType::Memory,
                     index: Indexes::Plain {},
                     quantization_config: None,
+                    multi_vec_config: None,
+                    datatype: None,
                 },
             )]),
             sparse_vector_data: Default::default(),
@@ -2211,6 +2292,8 @@ mod tests {
                         storage_type: VectorStorageType::Memory,
                         index: Indexes::Plain {},
                         quantization_config: None,
+                        multi_vec_config: None,
+                        datatype: None,
                     },
                 ),
                 (
@@ -2221,6 +2304,8 @@ mod tests {
                         storage_type: VectorStorageType::Memory,
                         index: Indexes::Plain {},
                         quantization_config: None,
+                        multi_vec_config: None,
+                        datatype: None,
                     },
                 ),
             ]),
@@ -2317,6 +2402,8 @@ mod tests {
                         storage_type: VectorStorageType::Memory,
                         index: Indexes::Plain {},
                         quantization_config: None,
+                        multi_vec_config: None,
+                        datatype: None,
                     },
                 ),
                 (
@@ -2327,6 +2414,8 @@ mod tests {
                         storage_type: VectorStorageType::Memory,
                         index: Indexes::Plain {},
                         quantization_config: None,
+                        multi_vec_config: None,
+                        datatype: None,
                     },
                 ),
             ]),
@@ -2409,7 +2498,6 @@ mod tests {
                     None,
                     1,
                     None,
-                    &false.into(),
                 )
                 .err()
                 .unwrap();
@@ -2426,6 +2514,7 @@ mod tests {
                     1,
                     None,
                     &false.into(),
+                    10_000,
                 )
                 .err()
                 .unwrap();
@@ -2465,5 +2554,72 @@ mod tests {
                 .err()
                 .unwrap();
         }
+    }
+
+    /// Test handling point versions
+    ///
+    /// Apply if the point version is equal or higher. Always apply if the point does not exist
+    /// yet.
+    ///
+    /// Before <https://github.com/qdrant/qdrant/pull/4060> this function would reject operations
+    /// on non-existent points if the operation ID was lower than the current segment version. That
+    /// should not happen, and this test asserts correct behavior.
+    #[test]
+    fn test_handle_point_version() {
+        // Create base segment with a single point
+        let dir = Builder::new().prefix("segment_dir").tempdir().unwrap();
+        let dim = 4;
+        let config = SegmentConfig {
+            vector_data: HashMap::from([(
+                DEFAULT_VECTOR_NAME.to_owned(),
+                VectorDataConfig {
+                    size: dim,
+                    distance: Distance::Dot,
+                    storage_type: VectorStorageType::Memory,
+                    index: Indexes::Plain {},
+                    quantization_config: None,
+                    multi_vec_config: None,
+                    datatype: None,
+                },
+            )]),
+            sparse_vector_data: Default::default(),
+            payload_storage_type: Default::default(),
+        };
+        let mut segment = build_segment(dir.path(), &config, true).unwrap();
+        segment
+            .upsert_point(100, 1.into(), only_default_vector(&[1.1, 1.0, 0.0, 1.0]))
+            .unwrap();
+
+        // Do not handle operation on existing point when providing an old version
+        let applied = segment
+            .handle_point_version(99, Some(0), |_segment| Ok((true, None)))
+            .unwrap();
+        assert!(!applied);
+
+        // Do handle operation on existing point when providing the current version
+        let applied = segment
+            .handle_point_version(100, Some(0), |_segment| Ok((true, None)))
+            .unwrap();
+        assert!(applied);
+
+        // Do handle operation on existing point when providing a newer version
+        let applied = segment
+            .handle_point_version(101, Some(0), |_segment| Ok((true, None)))
+            .unwrap();
+        assert!(applied);
+
+        // Always handle operations on non-existent points
+        let applied = segment
+            .handle_point_version(99, None, |_segment| Ok((true, None)))
+            .unwrap();
+        assert!(applied);
+        let applied = segment
+            .handle_point_version(100, None, |_segment| Ok((true, None)))
+            .unwrap();
+        assert!(applied);
+        let applied = segment
+            .handle_point_version(101, None, |_segment| Ok((true, None)))
+            .unwrap();
+        assert!(applied);
     }
 }
