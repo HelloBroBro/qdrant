@@ -522,6 +522,54 @@
         }
       }
     },
+    "/issues": {
+      "get": {
+        "summary": "Get issues",
+        "description": "Get a report of performance issues and configuration suggestions",
+        "operationId": "get_issues",
+        "tags": [
+          "beta"
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "4XX": {
+            "description": "error"
+          }
+        }
+      },
+      "delete": {
+        "summary": "Clear issues",
+        "description": "Removes all issues reported so far",
+        "operationId": "clear_issues",
+        "tags": [
+          "beta"
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "boolean"
+                }
+              }
+            }
+          },
+          "4XX": {
+            "description": "error"
+          }
+        }
+      }
+    },
     "/cluster": {
       "get": {
         "tags": [
@@ -5686,6 +5734,17 @@
                 "nullable": true
               }
             ]
+          },
+          "modifier": {
+            "description": "Configures addition value modifications for sparse vectors. Default: none",
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Modifier"
+              },
+              {
+                "nullable": true
+              }
+            ]
           }
         }
       },
@@ -5706,6 +5765,14 @@
             "nullable": true
           }
         }
+      },
+      "Modifier": {
+        "description": "If used, include weight modification, which will be applied to sparse vectors at query time: None - no modification (default) Idf - inverse document frequency, based on statistics of the collection",
+        "type": "string",
+        "enum": [
+          "none",
+          "idf"
+        ]
       },
       "HnswConfig": {
         "description": "Config of HNSW index",
@@ -10159,6 +10226,12 @@
             "default": null,
             "type": "string",
             "nullable": true
+          },
+          "api_key": {
+            "description": "Optional API key used when fetching the snapshot from a remote URL.",
+            "default": null,
+            "type": "string",
+            "nullable": true
           }
         }
       },
@@ -10833,6 +10906,12 @@
           },
           "checksum": {
             "description": "Optional SHA256 checksum to verify snapshot integrity before recovery.",
+            "default": null,
+            "type": "string",
+            "nullable": true
+          },
+          "api_key": {
+            "description": "Optional API key used when fetching the snapshot from a remote URL.",
             "default": null,
             "type": "string",
             "nullable": true

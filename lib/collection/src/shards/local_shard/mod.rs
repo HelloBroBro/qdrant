@@ -561,7 +561,24 @@ impl LocalShard {
             }
         }
 
-        self.segments.read().flush_all(true)?;
+        {
+            let segments = self.segments.read();
+
+            // It is possible, that after recovery, if WAL flush was not enforced.
+            // We could be left with some un-versioned points.
+            // To maintain consistency, we can either remove them or try to recover.
+            for (_idx, segment) in segments.iter() {
+                match segment {
+                    LockedSegment::Original(raw_segment) => {
+                        raw_segment.write().cleanup_versions()?;
+                    }
+                    LockedSegment::Proxy(_) => {
+                        debug_assert!(false, "Proxy segment found in load_from_wal");
+                    }
+                }
+            }
+            segments.flush_all(true)?;
+        }
 
         bar.finish();
         if !show_progress_bar {
@@ -777,14 +794,9 @@ impl LocalShard {
         filter: Option<&'a Filter>,
     ) -> CollectionResult<BTreeSet<PointIdType>> {
         let segments = self.segments().read();
-        let some_segment = segments.iter().next();
-
-        if some_segment.is_none() {
-            return Ok(Default::default());
-        }
         let all_points: BTreeSet<_> = segments
-            .iter()
-            .flat_map(|(_id, segment)| segment.get().read().read_filtered(None, None, filter))
+            .non_appendable_then_appendable_segments()
+            .flat_map(|segment| segment.get().read().read_filtered(None, None, filter))
             .collect();
         Ok(all_points)
     }

@@ -9,6 +9,7 @@ use segment::types::{ExtendedPointId, Order, ScoredPoint, WithPayloadInterface, 
 
 use super::Collection;
 use crate::operations::consistency_params::ReadConsistency;
+use crate::operations::query_enum::QueryEnum;
 use crate::operations::shard_selector_internal::ShardSelectorInternal;
 use crate::operations::types::*;
 
@@ -146,7 +147,7 @@ impl Collection {
                         }
                         for batch in &mut records {
                             for point in batch {
-                                point.shard_key = shard_key.clone();
+                                point.shard_key.clone_from(&shard_key);
                             }
                         }
                         Ok(records)

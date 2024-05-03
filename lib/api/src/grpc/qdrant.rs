@@ -112,6 +112,9 @@ pub struct SparseVectorParams {
     /// Configuration of sparse index
     #[prost(message, optional, tag = "1")]
     pub index: ::core::option::Option<SparseIndexConfig>,
+    /// If set - apply modifier to the vector values
+    #[prost(enumeration = "Modifier", optional, tag = "2")]
+    pub modifier: ::core::option::Option<i32>,
 }
 #[derive(serde::Serialize)]
 #[allow(clippy::derive_partial_eq_without_eq)]
@@ -1104,6 +1107,34 @@ impl Datatype {
             "Default" => Some(Self::Default),
             "Float32" => Some(Self::Float32),
             "Uint8" => Some(Self::Uint8),
+            _ => None,
+        }
+    }
+}
+#[derive(serde::Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum Modifier {
+    None = 0,
+    /// Apply Inverse Document Frequency
+    Idf = 1,
+}
+impl Modifier {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Modifier::None => "None",
+            Modifier::Idf => "Idf",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "None" => Some(Self::None),
+            "Idf" => Some(Self::Idf),
             _ => None,
         }
     }
@@ -11303,6 +11334,9 @@ pub struct RecoverShardSnapshotRequest {
     #[prost(string, optional, tag = "5")]
     #[validate(custom = "common::validation::validate_sha256_hash_option")]
     pub checksum: ::core::option::Option<::prost::alloc::string::String>,
+    /// Optional API key used when fetching the snapshot from a remote URL
+    #[prost(string, optional, tag = "6")]
+    pub api_key: ::core::option::Option<::prost::alloc::string::String>,
 }
 #[derive(serde::Serialize)]
 #[allow(clippy::derive_partial_eq_without_eq)]
