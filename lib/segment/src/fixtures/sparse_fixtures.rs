@@ -8,7 +8,7 @@ use common::types::PointOffsetType;
 use rand::Rng;
 use sparse::common::sparse_vector::SparseVector;
 use sparse::common::sparse_vector_fixture::random_sparse_vector;
-use sparse::index::inverted_index::inverted_index_ram::InvertedIndexRam;
+use sparse::index::inverted_index::inverted_index_immutable_ram::InvertedIndexImmutableRam;
 use sparse::index::inverted_index::InvertedIndex;
 
 use crate::common::operation_error::OperationResult;
@@ -88,7 +88,7 @@ pub fn fixture_sparse_index_ram<R: Rng + ?Sized>(
     full_scan_threshold: usize,
     data_dir: &Path,
     stopped: &AtomicBool,
-) -> SparseVectorIndex<InvertedIndexRam> {
+) -> SparseVectorIndex<InvertedIndexImmutableRam> {
     fixture_sparse_index_ram_from_iter(
         (0..num_vectors).map(|_| random_sparse_vector(rnd, max_dim)),
         full_scan_threshold,
@@ -105,7 +105,7 @@ pub fn fixture_sparse_index_ram_from_iter<P: FnMut()>(
     data_dir: &Path,
     stopped: &AtomicBool,
     progress: impl FnOnce() -> P,
-) -> SparseVectorIndex<InvertedIndexRam> {
+) -> SparseVectorIndex<InvertedIndexImmutableRam> {
     let num_vectors = vectors.len();
     let mut sparse_vector_index = fixture_open_sparse_index(
         data_dir,
@@ -115,7 +115,7 @@ pub fn fixture_sparse_index_ram_from_iter<P: FnMut()>(
         stopped,
     )
     .unwrap();
-    let mut borrowed_storage = sparse_vector_index.vector_storage.borrow_mut();
+    let mut borrowed_storage = sparse_vector_index.vector_storage().borrow_mut();
 
     // add points to storage
     for (idx, vec) in vectors.enumerate() {
@@ -128,7 +128,7 @@ pub fn fixture_sparse_index_ram_from_iter<P: FnMut()>(
     // assert all points are in storage
     assert_eq!(
         sparse_vector_index
-            .vector_storage
+            .vector_storage()
             .borrow()
             .available_vector_count(),
         num_vectors,

@@ -6,15 +6,14 @@ use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
 use atomic_refcell::AtomicRefCell;
+use io::storage_version::StorageVersion;
 use log::info;
 use parking_lot::Mutex;
-use semver::Version;
 use serde::Deserialize;
 use uuid::Uuid;
 
 use crate::common::operation_error::{check_process_stopped, OperationError, OperationResult};
 use crate::common::rocksdb_wrapper::{open_db, DB_VECTOR_CF};
-use crate::common::version::StorageVersion;
 use crate::data_types::vectors::DEFAULT_VECTOR_NAME;
 use crate::id_tracker::simple_id_tracker::SimpleIdTracker;
 use crate::id_tracker::IdTracker;
@@ -34,18 +33,22 @@ use crate::types::{
 };
 use crate::vector_storage::dense::appendable_mmap_dense_vector_storage::{
     open_appendable_memmap_vector_storage, open_appendable_memmap_vector_storage_byte,
+    open_appendable_memmap_vector_storage_half,
 };
 use crate::vector_storage::dense::memmap_dense_vector_storage::{
-    open_memmap_vector_storage, open_memmap_vector_storage_byte,
+    open_memmap_vector_storage, open_memmap_vector_storage_byte, open_memmap_vector_storage_half,
 };
 use crate::vector_storage::dense::simple_dense_vector_storage::{
-    open_simple_dense_byte_vector_storage, open_simple_dense_vector_storage,
+    open_simple_dense_byte_vector_storage, open_simple_dense_half_vector_storage,
+    open_simple_dense_vector_storage,
 };
 use crate::vector_storage::multi_dense::appendable_mmap_multi_dense_vector_storage::{
     open_appendable_memmap_multi_vector_storage, open_appendable_memmap_multi_vector_storage_byte,
+    open_appendable_memmap_multi_vector_storage_half,
 };
 use crate::vector_storage::multi_dense::simple_multi_dense_vector_storage::{
     open_simple_multi_dense_vector_storage, open_simple_multi_dense_vector_storage_byte,
+    open_simple_multi_dense_vector_storage_half,
 };
 use crate::vector_storage::quantized::quantized_vectors::QuantizedVectors;
 use crate::vector_storage::simple_sparse_vector_storage::open_simple_sparse_vector_storage;
@@ -113,7 +116,7 @@ fn create_segment(
             config
                 .sparse_vector_data
                 .values()
-                .map(|sparse_vector_config| sparse_vector_config.is_appendable()),
+                .map(|sparse_vector_config| sparse_vector_config.index.index_type.is_appendable()),
         )
         .all(|v| v);
 
@@ -156,6 +159,16 @@ fn create_segment(
                                 stopped,
                             )?
                         }
+                        VectorStorageDatatype::Float16 => {
+                            open_simple_multi_dense_vector_storage_half(
+                                database.clone(),
+                                &db_column_name,
+                                vector_config.size,
+                                vector_config.distance,
+                                *multi_vec_config,
+                                stopped,
+                            )?
+                        }
                     }
                 } else {
                     match storage_element_type {
@@ -167,6 +180,13 @@ fn create_segment(
                             stopped,
                         )?,
                         VectorStorageDatatype::Uint8 => open_simple_dense_byte_vector_storage(
+                            database.clone(),
+                            &db_column_name,
+                            vector_config.size,
+                            vector_config.distance,
+                            stopped,
+                        )?,
+                        VectorStorageDatatype::Float16 => open_simple_dense_half_vector_storage(
                             database.clone(),
                             &db_column_name,
                             vector_config.size,
@@ -197,6 +217,14 @@ fn create_segment(
                                 *multi_vec_config,
                             )?
                         }
+                        VectorStorageDatatype::Float16 => {
+                            open_appendable_memmap_multi_vector_storage_half(
+                                &vector_storage_path,
+                                vector_config.size,
+                                vector_config.distance,
+                                *multi_vec_config,
+                            )?
+                        }
                     }
                 } else {
                     match storage_element_type {
@@ -206,6 +234,11 @@ fn create_segment(
                             vector_config.distance,
                         )?,
                         VectorStorageDatatype::Uint8 => open_memmap_vector_storage_byte(
+                            &vector_storage_path,
+                            vector_config.size,
+                            vector_config.distance,
+                        )?,
+                        VectorStorageDatatype::Float16 => open_memmap_vector_storage_half(
                             &vector_storage_path,
                             vector_config.size,
                             vector_config.distance,
@@ -233,6 +266,14 @@ fn create_segment(
                                 *multi_vec_config,
                             )?
                         }
+                        VectorStorageDatatype::Float16 => {
+                            open_appendable_memmap_multi_vector_storage_half(
+                                &vector_storage_path,
+                                vector_config.size,
+                                vector_config.distance,
+                                *multi_vec_config,
+                            )?
+                        }
                     }
                 } else {
                     match storage_element_type {
@@ -246,6 +287,13 @@ fn create_segment(
                             vector_config.size,
                             vector_config.distance,
                         )?,
+                        VectorStorageDatatype::Float16 => {
+                            open_appendable_memmap_vector_storage_half(
+                                &vector_storage_path,
+                                vector_config.size,
+                                vector_config.distance,
+                            )?
+                        }
                     }
                 }
             }
@@ -332,6 +380,24 @@ fn create_segment(
         }
 
         let vector_index = match sparse_vector_config.index.index_type {
+            SparseIndexType::MutableRam => sp(VectorIndexEnum::SparseRam(SparseVectorIndex::open(
+                sparse_vector_config.index,
+                id_tracker.clone(),
+                vector_storage.clone(),
+                payload_index.clone(),
+                &vector_index_path,
+                stopped,
+            )?)),
+            SparseIndexType::ImmutableRam => sp(VectorIndexEnum::SparseImmutableRam(
+                SparseVectorIndex::open(
+                    sparse_vector_config.index,
+                    id_tracker.clone(),
+                    vector_storage.clone(),
+                    payload_index.clone(),
+                    &vector_index_path,
+                    stopped,
+                )?,
+            )),
             SparseIndexType::Mmap => sp(VectorIndexEnum::SparseMmap(SparseVectorIndex::open(
                 sparse_vector_config.index,
                 id_tracker.clone(),
@@ -340,16 +406,6 @@ fn create_segment(
                 &vector_index_path,
                 stopped,
             )?)),
-            SparseIndexType::MutableRam | SparseIndexType::ImmutableRam => {
-                sp(VectorIndexEnum::SparseRam(SparseVectorIndex::open(
-                    sparse_vector_config.index,
-                    id_tracker.clone(),
-                    vector_storage.clone(),
-                    payload_index.clone(),
-                    &vector_index_path,
-                    stopped,
-                )?))
-            }
         };
 
         check_process_stopped(stopped)?;
@@ -398,7 +454,7 @@ pub fn load_segment(path: &Path, stopped: &AtomicBool) -> OperationResult<Option
         return Ok(None);
     }
 
-    if !SegmentVersion::check_exists(path) {
+    let Some(stored_version) = SegmentVersion::load(path)? else {
         // Assume segment was not properly saved.
         // Server might have crashed before saving the segment fully.
         log::warn!(
@@ -406,10 +462,9 @@ pub fn load_segment(path: &Path, stopped: &AtomicBool) -> OperationResult<Option
             path.display()
         );
         return Ok(None);
-    }
+    };
 
-    let stored_version: Version = SegmentVersion::load(path)?.parse()?;
-    let app_version: Version = SegmentVersion::current().parse()?;
+    let app_version = SegmentVersion::current();
 
     if stored_version != app_version {
         info!("Migrating segment {} -> {}", stored_version, app_version,);

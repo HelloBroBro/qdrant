@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::slice::ChunksExactMut;
 
+use half::f16;
 use itertools::Itertools;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -11,10 +12,7 @@ use super::named_vectors::NamedVectors;
 use super::primitive::PrimitiveVectorElement;
 use crate::common::operation_error::{OperationError, OperationResult};
 use crate::common::utils::transpose_map_into_named_vector;
-use crate::vector_storage::query::context_query::ContextQuery;
-use crate::vector_storage::query::discovery_query::DiscoveryQuery;
-use crate::vector_storage::query::reco_query::RecoQuery;
-use crate::vector_storage::query::TransformInto;
+use crate::vector_storage::query::{ContextQuery, DiscoveryQuery, RecoQuery, TransformInto};
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Vector {
@@ -36,7 +34,7 @@ impl Vector {
 pub enum VectorRef<'a> {
     Dense(&'a [VectorElementType]),
     Sparse(&'a SparseVector),
-    MultiDense(&'a MultiDenseVector),
+    MultiDense(TypedMultiDenseVectorRef<'a, VectorElementType>),
 }
 
 impl<'a> TryFrom<VectorRef<'a>> for &'a [VectorElementType] {
@@ -63,12 +61,15 @@ impl<'a> TryFrom<VectorRef<'a>> for &'a SparseVector {
     }
 }
 
-impl<'a> TryFrom<VectorRef<'a>> for &'a MultiDenseVector {
+impl<'a> TryFrom<VectorRef<'a>> for TypedMultiDenseVectorRef<'a, f32> {
     type Error = OperationError;
 
     fn try_from(value: VectorRef<'a>) -> Result<Self, Self::Error> {
         match value {
-            VectorRef::Dense(_) => Err(OperationError::WrongMulti),
+            VectorRef::Dense(d) => Ok(TypedMultiDenseVectorRef {
+                flattened_vectors: d,
+                dim: d.len(),
+            }),
             VectorRef::Sparse(_v) => Err(OperationError::WrongSparse),
             VectorRef::MultiDense(v) => Ok(v),
         }
@@ -115,7 +116,11 @@ impl TryFrom<Vector> for MultiDenseVector {
 
     fn try_from(value: Vector) -> Result<Self, Self::Error> {
         match value {
-            Vector::Dense(_) => Err(OperationError::WrongMulti),
+            Vector::Dense(v) => {
+                // expand single dense vector into multivector with a single vector
+                let len = v.len();
+                Ok(MultiDenseVector::new(v, len))
+            }
             Vector::Sparse(_) => Err(OperationError::WrongSparse),
             Vector::MultiDense(v) => Ok(v),
         }
@@ -136,6 +141,12 @@ impl<'a> From<&'a DenseVector> for VectorRef<'a> {
 
 impl<'a> From<&'a MultiDenseVector> for VectorRef<'a> {
     fn from(val: &'a MultiDenseVector) -> Self {
+        VectorRef::MultiDense(TypedMultiDenseVectorRef::from(val))
+    }
+}
+
+impl<'a> From<TypedMultiDenseVectorRef<'a, VectorElementType>> for VectorRef<'a> {
+    fn from(val: TypedMultiDenseVectorRef<'a, VectorElementType>) -> Self {
         VectorRef::MultiDense(val)
     }
 }
@@ -169,13 +180,15 @@ impl<'a> From<&'a Vector> for VectorRef<'a> {
         match val {
             Vector::Dense(v) => VectorRef::Dense(v.as_slice()),
             Vector::Sparse(v) => VectorRef::Sparse(v),
-            Vector::MultiDense(v) => VectorRef::MultiDense(v),
+            Vector::MultiDense(v) => VectorRef::MultiDense(TypedMultiDenseVectorRef::from(v)),
         }
     }
 }
 
 /// Type of vector element.
 pub type VectorElementType = f32;
+
+pub type VectorElementTypeHalf = f16;
 
 pub type VectorElementTypeByte = u8;
 
@@ -267,7 +280,7 @@ impl<T: PrimitiveVectorElement> TryFrom<Vec<TypedDenseVector<T>>> for TypedMulti
         let dim = value[0].len();
         // assert all vectors have the same dimension
         if let Some(bad_vec) = value.iter().find(|v| v.len() != dim) {
-            Err(OperationError::WrongVector {
+            Err(OperationError::WrongVectorDimension {
                 expected_dim: dim,
                 received_dim: bad_vec.len(),
             })
@@ -282,7 +295,7 @@ impl<T: PrimitiveVectorElement> TryFrom<Vec<TypedDenseVector<T>>> for TypedMulti
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct TypedMultiDenseVectorRef<'a, T> {
     pub flattened_vectors: &'a [T],
     pub dim: usize,
@@ -290,12 +303,16 @@ pub struct TypedMultiDenseVectorRef<'a, T> {
 
 impl<'a, T: PrimitiveVectorElement> TypedMultiDenseVectorRef<'a, T> {
     /// Slices the multi vector into the underlying individual vectors
-    pub fn multi_vectors(&self) -> impl Iterator<Item = &[T]> {
+    pub fn multi_vectors(self) -> impl Iterator<Item = &'a [T]> {
         self.flattened_vectors.chunks_exact(self.dim)
     }
 
-    pub fn is_empty(&self) -> bool {
+    pub fn is_empty(self) -> bool {
         self.flattened_vectors.is_empty()
+    }
+
+    pub fn len(self) -> usize {
+        self.flattened_vectors.len() / self.dim
     }
 
     // Cannot use `ToOwned` trait because of `Borrow` implementation for `TypedMultiDenseVector`
@@ -332,7 +349,7 @@ impl<'a> VectorRef<'a> {
         match self {
             VectorRef::Dense(v) => Vector::Dense(v.to_vec()),
             VectorRef::Sparse(v) => Vector::Sparse(v.clone()),
-            VectorRef::MultiDense(v) => Vector::MultiDense(v.clone()),
+            VectorRef::MultiDense(v) => Vector::MultiDense(v.to_owned()),
         }
     }
 }
@@ -366,7 +383,7 @@ impl<'a> TryInto<&'a MultiDenseVector> for &'a Vector {
 
     fn try_into(self) -> Result<&'a MultiDenseVector, Self::Error> {
         match self {
-            Vector::Dense(_) => Err(OperationError::WrongMulti),
+            Vector::Dense(_) => Err(OperationError::WrongMulti), // &Dense vector cannot be converted to &MultiDense
             Vector::Sparse(_) => Err(OperationError::WrongSparse),
             Vector::MultiDense(v) => Ok(v),
         }
@@ -382,7 +399,10 @@ pub fn only_default_vector(vec: &[VectorElementType]) -> NamedVectors {
 }
 
 pub fn only_default_multi_vector(vec: &MultiDenseVector) -> NamedVectors {
-    NamedVectors::from_ref(DEFAULT_VECTOR_NAME, VectorRef::MultiDense(vec))
+    NamedVectors::from_ref(
+        DEFAULT_VECTOR_NAME,
+        VectorRef::MultiDense(TypedMultiDenseVectorRef::from(vec)),
+    )
 }
 
 /// Full vector data per point separator with single and multiple vector modes
@@ -534,7 +554,8 @@ impl Named for NamedVectorStruct {
 }
 
 impl NamedVectorStruct {
-    pub fn new_from_vector(vector: Vector, name: String) -> Self {
+    pub fn new_from_vector(vector: Vector, name: impl Into<String>) -> Self {
+        let name = name.into();
         match vector {
             Vector::Dense(vector) => NamedVectorStruct::Dense(NamedVector { name, vector }),
             Vector::Sparse(vector) => NamedVectorStruct::Sparse(NamedSparseVector { name, vector }),
@@ -610,6 +631,7 @@ impl<T: Validate> Validate for NamedQuery<T> {
 
 impl NamedQuery<RecoQuery<Vector>> {
     pub fn new(query: RecoQuery<Vector>, using: Option<String>) -> Self {
+        // TODO: maybe validate there is no sparse vector without vector name
         NamedQuery { query, using }
     }
 }

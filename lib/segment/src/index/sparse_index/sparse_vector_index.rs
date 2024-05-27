@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::fs::create_dir_all;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
@@ -14,6 +14,7 @@ use sparse::common::types::DimId;
 use sparse::index::inverted_index::inverted_index_ram::InvertedIndexRam;
 use sparse::index::inverted_index::inverted_index_ram_builder::InvertedIndexBuilder;
 use sparse::index::inverted_index::InvertedIndex;
+use sparse::index::migrate::migrate;
 use sparse::index::search_context::SearchContext;
 
 use super::indices_tracker::IndicesTracker;
@@ -37,16 +38,43 @@ use crate::vector_storage::{
 };
 
 pub struct SparseVectorIndex<TInvertedIndex: InvertedIndex> {
-    pub config: SparseIndexConfig,
-    pub id_tracker: Arc<AtomicRefCell<IdTrackerSS>>,
-    pub vector_storage: Arc<AtomicRefCell<VectorStorageEnum>>,
-    pub payload_index: Arc<AtomicRefCell<StructPayloadIndex>>,
+    config: SparseIndexConfig,
+    id_tracker: Arc<AtomicRefCell<IdTrackerSS>>,
+    vector_storage: Arc<AtomicRefCell<VectorStorageEnum>>,
+    payload_index: Arc<AtomicRefCell<StructPayloadIndex>>,
     path: PathBuf,
-    pub inverted_index: TInvertedIndex,
+    inverted_index: TInvertedIndex,
     searches_telemetry: SparseSearchesTelemetry,
-    is_appendable: bool,
-    pub indices_tracker: IndicesTracker,
+    indices_tracker: IndicesTracker,
     scores_memory_pool: ScoresMemoryPool,
+}
+
+/// Getters for internals, used for testing.
+#[cfg(feature = "testing")]
+impl<TInvertedIndex: InvertedIndex> SparseVectorIndex<TInvertedIndex> {
+    pub fn config(&self) -> SparseIndexConfig {
+        self.config
+    }
+
+    pub fn id_tracker(&self) -> &Arc<AtomicRefCell<IdTrackerSS>> {
+        &self.id_tracker
+    }
+
+    pub fn vector_storage(&self) -> &Arc<AtomicRefCell<VectorStorageEnum>> {
+        &self.vector_storage
+    }
+
+    pub fn payload_index(&self) -> &Arc<AtomicRefCell<StructPayloadIndex>> {
+        &self.payload_index
+    }
+
+    pub fn inverted_index(&self) -> &TInvertedIndex {
+        &self.inverted_index
+    }
+
+    pub fn indices_tracker(&self) -> &IndicesTracker {
+        &self.indices_tracker
+    }
 }
 
 impl<TInvertedIndex: InvertedIndex> SparseVectorIndex<TInvertedIndex> {
@@ -61,10 +89,9 @@ impl<TInvertedIndex: InvertedIndex> SparseVectorIndex<TInvertedIndex> {
     ) -> OperationResult<Self> {
         // create directory if it does not exist
         create_dir_all(path)?;
-        let is_appendable = config.index_type == SparseIndexType::MutableRam;
 
         let config_path = SparseIndexConfig::get_config_path(path);
-        let (config, inverted_index, indices_tracker) = if is_appendable {
+        let (config, inverted_index, indices_tracker) = if !config.index_type.is_persisted() {
             // RAM mutable case - build inverted index from scratch and use provided config
             let (inverted_index, indices_tracker) = Self::build_inverted_index(
                 id_tracker.clone(),
@@ -76,6 +103,7 @@ impl<TInvertedIndex: InvertedIndex> SparseVectorIndex<TInvertedIndex> {
             (config, inverted_index, indices_tracker)
         } else if config_path.exists() {
             // Load inverted index and config
+            migrate(path)?;
             let loaded_config = SparseIndexConfig::load(&config_path)?;
             let inverted_index = TInvertedIndex::open(path)?;
             let indices_tracker =
@@ -99,7 +127,6 @@ impl<TInvertedIndex: InvertedIndex> SparseVectorIndex<TInvertedIndex> {
             path,
             inverted_index,
             searches_telemetry,
-            is_appendable,
             indices_tracker,
             scores_memory_pool,
         })
@@ -132,7 +159,9 @@ impl<TInvertedIndex: InvertedIndex> SparseVectorIndex<TInvertedIndex> {
             match borrowed_vector_storage.get_vector_opt(id) {
                 None => {
                     // the vector was lost in a crash but will be recovered by the WAL
-                    log::debug!("Sparse vector with id {} is not found", id)
+                    let point_id = borrowed_id_tracker.external_id(id);
+                    let point_version = borrowed_id_tracker.internal_version(id);
+                    log::debug!("Sparse vector with id {id} is not found, external_id: {point_id:?}, version: {point_version:?}")
                 }
                 Some(vector) => {
                     let vector: &SparseVector = vector.as_vec_ref().try_into()?;
@@ -155,12 +184,15 @@ impl<TInvertedIndex: InvertedIndex> SparseVectorIndex<TInvertedIndex> {
 
     /// Returns the maximum number of results that can be returned by the index for a given sparse vector
     /// Warning: the cost of this function grows with the number of dimensions in the query vector
+    #[cfg(feature = "testing")]
     pub fn max_result_count(&self, query_vector: &SparseVector) -> usize {
-        let mut unique_record_ids = HashSet::new();
+        use sparse::index::posting_list_common::PostingListIter as _;
+
+        let mut unique_record_ids = std::collections::HashSet::new();
         for dim_id in query_vector.indices.iter() {
             if let Some(dim_id) = self.indices_tracker.remap_index(*dim_id) {
-                if let Some(posting_list) = self.inverted_index.get(&dim_id) {
-                    for element in posting_list.elements.iter() {
+                if let Some(posting_list_iter) = self.inverted_index.get(&dim_id) {
+                    for element in posting_list_iter.into_std_iter() {
                         unique_record_ids.insert(element.record_id);
                     }
                 }
@@ -461,7 +493,7 @@ impl<TInvertedIndex: InvertedIndex> VectorIndex for SparseVectorIndex<TInvertedI
         self.indices_tracker = indices_tracker;
 
         // save inverted index
-        if !self.is_appendable {
+        if self.config.index_type.is_persisted() {
             self.indices_tracker.save(&self.path)?;
             self.inverted_index.save(&self.path)?;
         }
@@ -498,7 +530,7 @@ impl<TInvertedIndex: InvertedIndex> VectorIndex for SparseVectorIndex<TInvertedI
     }
 
     fn update_vector(&mut self, id: PointOffsetType, vector: VectorRef) -> OperationResult<()> {
-        if !self.is_appendable {
+        if self.config.index_type != SparseIndexType::MutableRam {
             return Err(OperationError::service_error(
                 "Cannot update vector in non-appendable index",
             ));

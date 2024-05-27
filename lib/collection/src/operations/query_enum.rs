@@ -1,7 +1,5 @@
 use segment::data_types::vectors::{DenseVector, Named, NamedQuery, NamedVectorStruct, Vector};
-use segment::vector_storage::query::context_query::ContextQuery;
-use segment::vector_storage::query::discovery_query::DiscoveryQuery;
-use segment::vector_storage::query::reco_query::RecoQuery;
+use segment::vector_storage::query::{ContextQuery, DiscoveryQuery, RecoQuery};
 use sparse::common::sparse_vector::SparseVector;
 
 impl QueryEnum {
@@ -11,6 +9,16 @@ impl QueryEnum {
             QueryEnum::RecommendBestScore(reco_query) => reco_query.get_name(),
             QueryEnum::Discover(discovery_query) => discovery_query.get_name(),
             QueryEnum::Context(context_query) => context_query.get_name(),
+        }
+    }
+
+    /// Only when the distance is the scoring, this will return true.
+    pub fn is_distance_scored(&self) -> bool {
+        match self {
+            QueryEnum::Nearest(_) => true,
+            QueryEnum::RecommendBestScore(_) | QueryEnum::Discover(_) | QueryEnum::Context(_) => {
+                false
+            }
         }
     }
 

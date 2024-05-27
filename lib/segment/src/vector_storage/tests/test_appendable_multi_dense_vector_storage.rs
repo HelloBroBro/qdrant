@@ -8,13 +8,13 @@ use rstest::rstest;
 use tempfile::Builder;
 
 use crate::common::rocksdb_wrapper::{open_db, DB_VECTOR_CF};
-use crate::data_types::vectors::{MultiDenseVector, QueryVector};
+use crate::data_types::vectors::{MultiDenseVector, QueryVector, TypedMultiDenseVectorRef};
 use crate::fixtures::payload_context_fixture::FixtureIdTracker;
 use crate::id_tracker::IdTrackerSS;
 use crate::types::{Distance, MultiVectorConfig};
 use crate::vector_storage::multi_dense::appendable_mmap_multi_dense_vector_storage::open_appendable_memmap_multi_vector_storage;
 use crate::vector_storage::multi_dense::simple_multi_dense_vector_storage::open_simple_multi_dense_vector_storage;
-use crate::vector_storage::{new_raw_scorer, VectorStorage, VectorStorageEnum};
+use crate::vector_storage::{new_raw_scorer, MultiVectorStorage, VectorStorage, VectorStorageEnum};
 
 #[derive(Clone, Copy)]
 enum MultiDenseStorageType {
@@ -59,8 +59,38 @@ fn do_test_delete_points(storage: Arc<AtomicRefCell<VectorStorageEnum>>) {
     // Check that all points are inserted
     for (i, vec) in points.iter().enumerate() {
         let stored_vec = borrowed_storage.get_vector(i as PointOffsetType);
-        let multi_dense: &MultiDenseVector = stored_vec.as_vec_ref().try_into().unwrap();
-        assert_eq!(multi_dense, vec);
+        let multi_dense: TypedMultiDenseVectorRef<_> = stored_vec.as_vec_ref().try_into().unwrap();
+        assert_eq!(multi_dense.to_owned(), vec.clone());
+    }
+    // Check that all points are inserted #2
+    {
+        let orig_iter = points.iter().flat_map(|multivec| multivec.multi_vectors());
+        match &borrowed_storage as &VectorStorageEnum {
+            VectorStorageEnum::DenseSimple(_) => unreachable!(),
+            VectorStorageEnum::DenseSimpleByte(_) => unreachable!(),
+            VectorStorageEnum::DenseSimpleHalf(_) => unreachable!(),
+            VectorStorageEnum::DenseMemmap(_) => unreachable!(),
+            VectorStorageEnum::DenseMemmapByte(_) => unreachable!(),
+            VectorStorageEnum::DenseMemmapHalf(_) => unreachable!(),
+            VectorStorageEnum::DenseAppendableMemmap(_) => unreachable!(),
+            VectorStorageEnum::DenseAppendableMemmapByte(_) => unreachable!(),
+            VectorStorageEnum::DenseAppendableMemmapHalf(_) => unreachable!(),
+            VectorStorageEnum::SparseSimple(_) => unreachable!(),
+            VectorStorageEnum::MultiDenseSimple(v) => {
+                for (orig, vec) in orig_iter.zip(v.iterate_inner_vectors()) {
+                    assert_eq!(orig, vec);
+                }
+            }
+            VectorStorageEnum::MultiDenseSimpleByte(_) => unreachable!(),
+            VectorStorageEnum::MultiDenseSimpleHalf(_) => unreachable!(),
+            VectorStorageEnum::MultiDenseAppendableMemmap(v) => {
+                for (orig, vec) in orig_iter.zip(v.iterate_inner_vectors()) {
+                    assert_eq!(orig, vec);
+                }
+            }
+            VectorStorageEnum::MultiDenseAppendableMemmapByte(_) => unreachable!(),
+            VectorStorageEnum::MultiDenseAppendableMemmapHalf(_) => unreachable!(),
+        };
     }
 
     // Delete select number of points
