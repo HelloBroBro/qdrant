@@ -310,6 +310,18 @@ impl LocalShard {
 
         let clocks = LocalShardClocks::load(shard_path)?;
 
+        // Always make sure we have any appendable segments, needed for update operations
+        if !segment_holder.has_appendable_segment() {
+            debug_assert!(
+                false,
+                "Shard has no appendable segments, this should never happen",
+            );
+            log::warn!("Shard has no appendable segments, this should never happen. Creating new appendable segment now");
+            let segments_path = LocalShard::segments_path(shard_path);
+            let collection_params = collection_config.read().await.params.clone();
+            segment_holder.create_appendable_segment(&segments_path, &collection_params)?;
+        }
+
         let local_shard = LocalShard::new(
             segment_holder,
             collection_config,
@@ -699,9 +711,7 @@ impl LocalShard {
             rx.await?;
         }
 
-        let collection_path = self.path.parent().map(Path::to_path_buf).ok_or_else(|| {
-            CollectionError::service_error("Failed to determine collection path for shard")
-        })?;
+        let segments_path = Self::segments_path(&self.path);
         let collection_params = self.collection_config.read().await.params.clone();
         let temp_path = temp_path.to_owned();
 
@@ -709,7 +719,7 @@ impl LocalShard {
             // Do not change segments while snapshotting
             SegmentHolder::snapshot_all_segments(
                 segments.clone(),
-                &collection_path,
+                &segments_path,
                 Some(&collection_params),
                 &temp_path,
                 &snapshot_segments_shard_path,
