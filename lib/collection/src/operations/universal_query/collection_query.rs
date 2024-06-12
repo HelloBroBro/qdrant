@@ -1,11 +1,23 @@
+use std::collections::HashSet;
+
 use api::rest::RecommendStrategy;
 use common::types::ScoreType;
+use itertools::Itertools;
 use segment::data_types::order_by::OrderBy;
-use segment::data_types::vectors::{MultiDenseVector, Vector, DEFAULT_VECTOR_NAME};
-use segment::types::{Filter, PointIdType, SearchParams, WithPayloadInterface, WithVector};
+use segment::data_types::vectors::{
+    MultiDenseVector, NamedQuery, NamedVectorStruct, Vector, VectorRef, DEFAULT_VECTOR_NAME,
+};
+use segment::types::{
+    Condition, Filter, HasIdCondition, PointIdType, SearchParams, WithPayloadInterface, WithVector,
+};
 use segment::vector_storage::query::{ContextPair, ContextQuery, DiscoveryQuery, RecoQuery};
 
-use super::shard_query::Fusion;
+use super::shard_query::{Fusion, ScoringQuery, ShardPrefetch, ShardQueryRequest};
+use crate::common::fetch_vectors::ReferencedVectors;
+use crate::common::retrieve_request_trait::RetrieveRequest;
+use crate::operations::query_enum::QueryEnum;
+use crate::operations::types::{CollectionError, CollectionResult};
+use crate::recommendations::avg_vector_for_recommendation;
 
 /// Internal representation of a query request, used to converge from REST and gRPC. This can have IDs referencing vectors.
 pub struct CollectionQueryRequest {
@@ -34,7 +46,7 @@ impl CollectionQueryRequest {
 
 pub enum Query {
     /// Score points against some vector(s)
-    Vector(VectorQuery),
+    Vector(VectorQuery<VectorInput>),
 
     /// Reciprocal rank fusion
     Fusion(Fusion),
@@ -43,17 +55,206 @@ pub enum Query {
     OrderBy(OrderBy),
 }
 
+impl Query {
+    pub fn try_into_scoring_query(
+        self,
+        ids_to_vectors: &ReferencedVectors,
+        lookup_vector_name: &str,
+        lookup_collection: Option<&String>,
+        using: String,
+    ) -> CollectionResult<ScoringQuery> {
+        let scoring_query = match self {
+            Query::Vector(vector_query) => {
+                let query_enum = vector_query
+                    // Homogenize the input into raw vectors
+                    .ids_into_vectors(ids_to_vectors, lookup_vector_name, lookup_collection)
+                    // Turn into QueryEnum
+                    .into_query_enum(using)?;
+
+                ScoringQuery::Vector(query_enum)
+            }
+            Query::Fusion(fusion) => ScoringQuery::Fusion(fusion),
+            Query::OrderBy(order_by) => ScoringQuery::OrderBy(order_by),
+        };
+
+        Ok(scoring_query)
+    }
+}
 pub enum VectorInput {
     Id(PointIdType),
     Vector(Vector),
 }
 
-pub enum VectorQuery {
-    Nearest(VectorInput),
-    RecommendAverageVector(RecoQuery<VectorInput>),
-    RecommendBestScore(RecoQuery<VectorInput>),
-    Discover(DiscoveryQuery<VectorInput>),
-    Context(ContextQuery<VectorInput>),
+impl VectorInput {
+    pub fn as_id(&self) -> Option<&PointIdType> {
+        match self {
+            VectorInput::Id(id) => Some(id),
+            VectorInput::Vector(_) => None,
+        }
+    }
+}
+
+pub enum VectorQuery<T> {
+    Nearest(T),
+    RecommendAverageVector(RecoQuery<T>),
+    RecommendBestScore(RecoQuery<T>),
+    Discover(DiscoveryQuery<T>),
+    Context(ContextQuery<T>),
+}
+
+impl<T> VectorQuery<T> {
+    /// Iterate through all items, without any kind of structure
+    pub fn flat_iter(&self) -> Box<dyn Iterator<Item = &T> + '_> {
+        match self {
+            VectorQuery::Nearest(input) => Box::new(std::iter::once(input)),
+            VectorQuery::RecommendAverageVector(query) => Box::new(query.flat_iter()),
+            VectorQuery::RecommendBestScore(query) => Box::new(query.flat_iter()),
+            VectorQuery::Discover(query) => Box::new(query.flat_iter()),
+            VectorQuery::Context(query) => Box::new(query.flat_iter()),
+        }
+    }
+}
+
+impl VectorQuery<VectorInput> {
+    /// Turns all [VectorInput]s into [Vector]s, using the provided [ReferencedVectors] to look up the vectors.
+    ///
+    /// Will panic if the ids are not found in the [ReferencedVectors].
+    fn ids_into_vectors(
+        self,
+        ids_to_vectors: &ReferencedVectors,
+        lookup_vector_name: &str,
+        lookup_collection: Option<&String>,
+    ) -> VectorQuery<Vector> {
+        match self {
+            VectorQuery::Nearest(vector_input) => {
+                let vector = ids_to_vectors
+                    .resolve_reference(lookup_collection, lookup_vector_name, vector_input)
+                    .unwrap();
+
+                VectorQuery::Nearest(vector)
+            }
+            VectorQuery::RecommendAverageVector(reco) => {
+                let positives = reco
+                    .positives
+                    .into_iter()
+                    .filter_map(|vector_input| {
+                        ids_to_vectors.resolve_reference(
+                            lookup_collection,
+                            lookup_vector_name,
+                            vector_input,
+                        )
+                    })
+                    .collect();
+                let negatives = reco
+                    .negatives
+                    .into_iter()
+                    .filter_map(|vector_input| {
+                        ids_to_vectors.resolve_reference(
+                            lookup_collection,
+                            lookup_vector_name,
+                            vector_input,
+                        )
+                    })
+                    .collect();
+
+                VectorQuery::RecommendAverageVector(RecoQuery::new(positives, negatives))
+            }
+            VectorQuery::RecommendBestScore(reco) => {
+                // TODO(universal-query): This is a copy-paste from `RecommendAverageVector` branch, remove duplicated code
+                let positives = reco
+                    .positives
+                    .into_iter()
+                    .filter_map(|vector_input| {
+                        ids_to_vectors.resolve_reference(
+                            lookup_collection,
+                            lookup_vector_name,
+                            vector_input,
+                        )
+                    })
+                    .collect();
+                let negatives = reco
+                    .negatives
+                    .into_iter()
+                    .filter_map(|vector_input| {
+                        ids_to_vectors.resolve_reference(
+                            lookup_collection,
+                            lookup_vector_name,
+                            vector_input,
+                        )
+                    })
+                    .collect();
+
+                VectorQuery::RecommendBestScore(RecoQuery::new(positives, negatives))
+            }
+            VectorQuery::Discover(discover) => {
+                let target = ids_to_vectors
+                    .resolve_reference(lookup_collection, lookup_vector_name, discover.target)
+                    .unwrap();
+                let pairs = discover
+                    .pairs
+                    .into_iter()
+                    .map(|pair| ContextPair {
+                        positive: ids_to_vectors
+                            .resolve_reference(lookup_collection, lookup_vector_name, pair.positive)
+                            .unwrap(),
+                        negative: ids_to_vectors
+                            .resolve_reference(lookup_collection, lookup_vector_name, pair.negative)
+                            .unwrap(),
+                    })
+                    .collect();
+
+                VectorQuery::Discover(DiscoveryQuery { target, pairs })
+            }
+            VectorQuery::Context(context) => {
+                let pairs = context
+                    .pairs
+                    .into_iter()
+                    .map(|pair| ContextPair {
+                        positive: ids_to_vectors
+                            .resolve_reference(lookup_collection, lookup_vector_name, pair.positive)
+                            .unwrap(),
+                        negative: ids_to_vectors
+                            .resolve_reference(lookup_collection, lookup_vector_name, pair.negative)
+                            .unwrap(),
+                    })
+                    .collect();
+
+                VectorQuery::Context(ContextQuery { pairs })
+            }
+        }
+    }
+}
+
+impl VectorQuery<Vector> {
+    fn into_query_enum(self, using: String) -> CollectionResult<QueryEnum> {
+        let query_enum = match self {
+            VectorQuery::Nearest(vector) => {
+                QueryEnum::Nearest(NamedVectorStruct::new_from_vector(vector, using))
+            }
+            VectorQuery::RecommendAverageVector(reco) => {
+                // Get average vector
+                let search_vector = avg_vector_for_recommendation(
+                    reco.positives.iter().map(VectorRef::from),
+                    reco.negatives.iter().map(VectorRef::from).peekable(),
+                )?;
+                QueryEnum::Nearest(NamedVectorStruct::new_from_vector(search_vector, using))
+            }
+            VectorQuery::RecommendBestScore(reco) => QueryEnum::RecommendBestScore(NamedQuery {
+                query: reco,
+                using: Some(using),
+            }),
+            VectorQuery::Discover(discover) => QueryEnum::Discover(NamedQuery {
+                query: discover,
+                using: Some(using),
+            }),
+            VectorQuery::Context(context) => QueryEnum::Context(NamedQuery {
+                query: context,
+                using: Some(using),
+            }),
+        };
+
+        Ok(query_enum)
+    }
 }
 
 pub struct CollectionPrefetch {
@@ -65,6 +266,144 @@ pub struct CollectionPrefetch {
     pub limit: usize,
     /// Search params for when there is no prefetch
     pub params: Option<SearchParams>,
+}
+
+/// Exclude the referenced ids by editing the filter.
+fn exclude_referenced_ids(query: &Option<Query>, filter: Option<Filter>) -> Option<Filter> {
+    match query {
+        Some(Query::Vector(vector_query)) => {
+            let ids: HashSet<_> = vector_query
+                .get_referenced_ids()
+                .into_iter()
+                .copied()
+                .collect();
+
+            if ids.is_empty() {
+                return filter;
+            }
+
+            let id_filter = Filter::new_must_not(Condition::HasId(HasIdCondition::from(ids)));
+            Some(id_filter.merge_owned(filter.unwrap_or_default()))
+        }
+        _ => filter,
+    }
+}
+
+impl CollectionPrefetch {
+    fn try_into_shard_prefetch(
+        self,
+        ids_to_vectors: &ReferencedVectors,
+        lookup_vector_name: &str,
+        lookup_collection: Option<&String>,
+    ) -> CollectionResult<ShardPrefetch> {
+        // Check no prefetches without a query
+        if !self.prefetch.is_empty() && self.query.is_none() {
+            return Err(CollectionError::bad_request(
+                "A query is needed to merge the prefetches. Can't have prefetches without defining a query.",
+            ));
+        }
+
+        let filter = exclude_referenced_ids(&self.query, self.filter);
+
+        let query = self
+            .query
+            .map(|query| {
+                query.try_into_scoring_query(
+                    ids_to_vectors,
+                    lookup_vector_name,
+                    lookup_collection,
+                    self.using,
+                )
+            })
+            .transpose()?;
+
+        let prefetches = self
+            .prefetch
+            .into_iter()
+            .map(|prefetch| {
+                prefetch.try_into_shard_prefetch(
+                    ids_to_vectors,
+                    lookup_vector_name,
+                    lookup_collection,
+                )
+            })
+            .try_collect()?;
+
+        Ok(ShardPrefetch {
+            prefetches,
+            query,
+            filter,
+            score_threshold: self.score_threshold,
+            limit: self.limit,
+            params: self.params,
+        })
+    }
+}
+
+impl CollectionQueryRequest {
+    /// Substitutes all the point ids in the request with the actual vectors, as well as editing filters so that ids are not included in the response.
+    pub fn try_into_shard_request(
+        self,
+        ids_to_vectors: &ReferencedVectors,
+    ) -> CollectionResult<ShardQueryRequest> {
+        // Check no prefetches without a query
+        if !self.prefetch.is_empty() && self.query.is_none() {
+            return Err(CollectionError::bad_request(
+                "A query is needed to merge the prefetches. Can't have prefetches without defining a query.",
+            ));
+        }
+
+        // Check we actually fetched all referenced vectors in this request (and nested prefetches)
+        for &point_id in &(&self).get_referenced_point_ids() {
+            if ids_to_vectors.get(&None, point_id).is_none() {
+                return Err(CollectionError::PointNotFound {
+                    missed_point_id: point_id,
+                });
+            }
+        }
+
+        let lookup_vector_name = (&self).get_lookup_vector_name();
+        let lookup_collection = (&self).get_lookup_collection().cloned();
+        let using = self.using.clone();
+
+        let filter = exclude_referenced_ids(&self.query, self.filter);
+
+        let query = self
+            .query
+            .map(|query| {
+                query.try_into_scoring_query(
+                    ids_to_vectors,
+                    &lookup_vector_name,
+                    lookup_collection.as_ref(),
+                    using,
+                )
+            })
+            .transpose()?;
+
+        let prefetches = self
+            .prefetch
+            .into_iter()
+            .map(|prefetch| {
+                prefetch.try_into_shard_prefetch(
+                    ids_to_vectors,
+                    &lookup_vector_name,
+                    lookup_collection.as_ref(),
+                )
+            })
+            .try_collect()?;
+
+        Ok(ShardQueryRequest {
+            prefetches,
+            query,
+            filter,
+            score_threshold: self.score_threshold,
+            limit: self.limit,
+            offset: self.offset,
+            params: self.params,
+            with_vector: self.with_vector,
+            with_payload: self.with_payload,
+        })
+    }
 }
 
 mod from_rest {
@@ -147,16 +486,16 @@ mod from_rest {
         }
     }
 
-    impl From<rest::RecommendInput> for VectorQuery {
+    impl From<rest::RecommendInput> for VectorQuery<VectorInput> {
         fn from(value: rest::RecommendInput) -> Self {
             let rest::RecommendInput {
-                positives,
-                negatives,
+                positive,
+                negative,
                 strategy,
             } = value;
 
-            let positives = positives.into_iter().flatten().map(From::from).collect();
-            let negatives = negatives.into_iter().flatten().map(From::from).collect();
+            let positives = positive.into_iter().flatten().map(From::from).collect();
+            let negatives = negative.into_iter().flatten().map(From::from).collect();
 
             let reco_query = RecoQuery::new(positives, negatives);
 
@@ -167,15 +506,12 @@ mod from_rest {
         }
     }
 
-    impl From<rest::DiscoverInput> for VectorQuery {
+    impl From<rest::DiscoverInput> for VectorQuery<VectorInput> {
         fn from(value: rest::DiscoverInput) -> Self {
-            let rest::DiscoverInput {
-                target,
-                context_pairs,
-            } = value;
+            let rest::DiscoverInput { target, context } = value;
 
             let target = From::from(target);
-            let context = context_pairs
+            let context = context
                 .into_iter()
                 .flatten()
                 .map(context_pair_from_rest)
@@ -185,9 +521,9 @@ mod from_rest {
         }
     }
 
-    impl From<rest::ContextInput> for VectorQuery {
+    impl From<rest::ContextInput> for VectorQuery<VectorInput> {
         fn from(value: rest::ContextInput) -> Self {
-            let rest::ContextInput { pairs } = value;
+            let rest::ContextInput(pairs) = value;
 
             let context = pairs
                 .into_iter()
@@ -367,21 +703,21 @@ mod from_grpc {
         }
     }
 
-    impl TryFrom<grpc::RecommendInput> for VectorQuery {
+    impl TryFrom<grpc::RecommendInput> for VectorQuery<VectorInput> {
         type Error = Status;
 
         fn try_from(value: grpc::RecommendInput) -> Result<Self, Self::Error> {
             let grpc::RecommendInput {
-                positives,
-                negatives,
+                positive,
+                negative,
                 strategy,
             } = value;
 
-            let positives = positives
+            let positives = positive
                 .into_iter()
                 .map(TryFrom::try_from)
                 .collect::<Result<Vec<_>, _>>()?;
-            let negatives = negatives
+            let negatives = negative
                 .into_iter()
                 .map(TryFrom::try_from)
                 .collect::<Result<Vec<_>, _>>()?;
@@ -402,21 +738,21 @@ mod from_grpc {
         }
     }
 
-    impl TryFrom<grpc::DiscoverInput> for VectorQuery {
+    impl TryFrom<grpc::DiscoverInput> for VectorQuery<VectorInput> {
         type Error = Status;
 
         fn try_from(value: grpc::DiscoverInput) -> Result<Self, Self::Error> {
-            let grpc::DiscoverInput {
-                target,
-                context_pairs,
-            } = value;
+            let grpc::DiscoverInput { target, context } = value;
 
             let target = VectorInput::try_from(
                 target
                     .ok_or_else(|| Status::invalid_argument("DiscoverInput target is missing"))?,
             )?;
 
-            let context = context_pairs
+            let grpc::ContextInput { pairs } = context
+                .ok_or_else(|| Status::invalid_argument("DiscoverInput context is missing"))?;
+
+            let context = pairs
                 .into_iter()
                 .map(context_pair_from_grpc)
                 .collect::<Result<_, _>>()?;
@@ -425,18 +761,13 @@ mod from_grpc {
         }
     }
 
-    impl TryFrom<grpc::ContextInput> for VectorQuery {
+    impl TryFrom<grpc::ContextInput> for VectorQuery<VectorInput> {
         type Error = Status;
 
         fn try_from(value: grpc::ContextInput) -> Result<Self, Self::Error> {
-            let grpc::ContextInput { context_pairs } = value;
+            let context_query = context_query_from_grpc(value)?;
 
-            Ok(VectorQuery::Context(ContextQuery {
-                pairs: context_pairs
-                    .into_iter()
-                    .map(context_pair_from_grpc)
-                    .collect::<Result<_, _>>()?,
-            }))
+            Ok(VectorQuery::Context(context_query))
         }
     }
 
@@ -465,10 +796,24 @@ mod from_grpc {
     }
 
     /// Circular dependencies prevents us from implementing `TryFrom` directly
+    fn context_query_from_grpc(
+        value: grpc::ContextInput,
+    ) -> Result<ContextQuery<VectorInput>, Status> {
+        let grpc::ContextInput { pairs } = value;
+
+        Ok(ContextQuery {
+            pairs: pairs
+                .into_iter()
+                .map(context_pair_from_grpc)
+                .collect::<Result<_, _>>()?,
+        })
+    }
+
+    /// Circular dependencies prevents us from implementing `TryFrom` directly
     fn context_pair_from_grpc(
-        value: grpc::ContextPairInput,
+        value: grpc::ContextInputPair,
     ) -> Result<ContextPair<VectorInput>, Status> {
-        let grpc::ContextPairInput { positive, negative } = value;
+        let grpc::ContextInputPair { positive, negative } = value;
 
         let positive =
             positive.ok_or_else(|| Status::invalid_argument("ContextPair positive is missing"))?;

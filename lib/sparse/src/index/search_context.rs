@@ -1,5 +1,4 @@
 use std::cmp::{max, min, Ordering};
-use std::ops::ControlFlow;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering::Relaxed;
 
@@ -140,19 +139,18 @@ impl<'a, 'b, T: PostingListIter> SearchContext<'a, 'b, T> {
         self.pooled.scores.resize(batch_len as usize, 0.0);
 
         for posting in self.postings_iterators.iter_mut() {
-            posting.posting_list_iterator.try_for_each(|element| {
-                let element_id = element.record_id;
-                if element_id > batch_last_id {
-                    // reaching end of the batch
-                    ControlFlow::Break(())
-                } else {
-                    let element_score = element.weight * posting.query_weight;
-                    // update score for id
-                    let local_id = (element_id - batch_start_id) as usize;
-                    self.pooled.scores[local_id] += element_score;
-                    ControlFlow::Continue(())
-                }
-            });
+            posting.posting_list_iterator.for_each_till_id(
+                batch_last_id,
+                self.pooled.scores.as_mut_slice(),
+                #[inline(always)]
+                |scores, id, weight| {
+                    let element_score = weight * posting.query_weight;
+                    let local_id = (id - batch_start_id) as usize;
+                    // SAFETY: `id` is within `batch_start_id..=batch_last_id`
+                    // Thus, `local_id` is within `0..batch_len`.
+                    *unsafe { scores.get_unchecked_mut(local_id) } += element_score;
+                },
+            );
         }
 
         for (local_index, &score) in self.pooled.scores.iter().enumerate() {
@@ -176,18 +174,18 @@ impl<'a, 'b, T: PostingListIter> SearchContext<'a, 'b, T> {
     fn process_last_posting_list<F: Fn(PointOffsetType) -> bool>(&mut self, filter_condition: &F) {
         debug_assert_eq!(self.postings_iterators.len(), 1);
         let posting = &mut self.postings_iterators[0];
-        posting.posting_list_iterator.try_for_each(|element| {
-            // do not score if filter condition is not satisfied
-            if !filter_condition(element.record_id) {
-                return ControlFlow::Continue(());
-            }
-            let score = element.weight * posting.query_weight;
-            self.top_results.push(ScoredPointOffset {
-                score,
-                idx: element.record_id,
-            });
-            ControlFlow::<()>::Continue(())
-        });
+        posting.posting_list_iterator.for_each_till_id(
+            PointOffsetType::MAX,
+            &mut (),
+            |_, id, weight| {
+                // do not score if filter condition is not satisfied
+                if !filter_condition(id) {
+                    return;
+                }
+                let score = weight * posting.query_weight;
+                self.top_results.push(ScoredPointOffset { score, idx: id });
+            },
+        );
     }
 
     /// Returns the next min record id from all posting list iterators
@@ -380,18 +378,50 @@ impl<'a, 'b, T: PostingListIter> SearchContext<'a, 'b, T> {
 }
 
 #[cfg(test)]
+#[generic_tests::define]
 mod tests {
+    use std::any::TypeId;
+    use std::borrow::Cow;
     use std::sync::OnceLock;
 
     use rand::Rng;
+    use tempfile::TempDir;
 
     use super::*;
     use crate::common::scores_memory_pool::ScoresMemoryPool;
     use crate::common::sparse_vector::SparseVector;
     use crate::common::sparse_vector_fixture::random_sparse_vector;
-    use crate::index::inverted_index::inverted_index_mmap::InvertedIndexMmap;
     use crate::index::inverted_index::inverted_index_ram::InvertedIndexRam;
     use crate::index::inverted_index::inverted_index_ram_builder::InvertedIndexBuilder;
+    use crate::index::inverted_index::{
+        inverted_index_compressed_immutable_ram, inverted_index_compressed_mmap,
+        inverted_index_immutable_ram, inverted_index_mmap,
+    };
+
+    // ---- Test instantiations ----
+
+    #[instantiate_tests(<InvertedIndexRam>)]
+    mod ram {}
+
+    #[instantiate_tests(<inverted_index_mmap::InvertedIndexMmap>)]
+    mod mmap {}
+
+    #[instantiate_tests(<inverted_index_immutable_ram::InvertedIndexImmutableRam>)]
+    mod iram {}
+
+    #[instantiate_tests(<inverted_index_compressed_immutable_ram::InvertedIndexImmutableRam<f32>>)]
+    mod iram_f32 {}
+
+    #[instantiate_tests(<inverted_index_compressed_immutable_ram::InvertedIndexImmutableRam<half::f16>>)]
+    mod iram_f16 {}
+
+    #[instantiate_tests(<inverted_index_compressed_mmap::InvertedIndexMmap<f32>>)]
+    mod mmap_f32 {}
+
+    #[instantiate_tests(<inverted_index_compressed_mmap::InvertedIndexMmap<half::f16>>)]
+    mod mmap_f16 {}
+
+    // --- End of test instantiations ---
 
     static TEST_SCORES_POOL: OnceLock<ScoresMemoryPool> = OnceLock::new();
 
@@ -401,26 +431,55 @@ mod tests {
             .get()
     }
 
+    /// Match all filter condition for testing
+    fn match_all(_p: PointOffsetType) -> bool {
+        true
+    }
+
+    /// Helper struct to store both an index and a temporary directory
+    struct TestIndex<I: InvertedIndex> {
+        index: I,
+        temp_dir: TempDir,
+    }
+
+    impl<I: InvertedIndex> TestIndex<I> {
+        fn from_ram(ram_index: InvertedIndexRam) -> Self {
+            let temp_dir = tempfile::Builder::new()
+                .prefix("test_index_dir")
+                .tempdir()
+                .unwrap();
+            TestIndex {
+                index: I::from_ram_index(Cow::Owned(ram_index), &temp_dir).unwrap(),
+                temp_dir,
+            }
+        }
+    }
+
     #[test]
-    fn test_empty_query() {
+    fn test_empty_query<I: InvertedIndex>() {
+        let index = TestIndex::<I>::from_ram(InvertedIndexRam::empty());
+
         let is_stopped = AtomicBool::new(false);
-        let index = InvertedIndexRam::empty();
         let mut search_context = SearchContext::new(
             RemappedSparseVector::default(), // empty query vector
             10,
-            &index,
+            &index.index,
             get_pooled_scores(),
             &is_stopped,
         );
         assert_eq!(search_context.search(&match_all), Vec::new());
     }
 
-    /// Match all filter condition for testing
-    fn match_all(_p: PointOffsetType) -> bool {
-        true
-    }
+    #[test]
+    fn search_test<I: InvertedIndex>() {
+        let index = TestIndex::<I>::from_ram({
+            let mut builder = InvertedIndexBuilder::new();
+            builder.add(1, [(1, 10.0), (2, 10.0), (3, 10.0)].into());
+            builder.add(2, [(1, 20.0), (2, 20.0), (3, 20.0)].into());
+            builder.add(3, [(1, 30.0), (2, 30.0), (3, 30.0)].into());
+            builder.build()
+        });
 
-    fn _search_test(inverted_index: &impl InvertedIndex) {
         let is_stopped = AtomicBool::new(false);
         let mut search_context = SearchContext::new(
             RemappedSparseVector {
@@ -428,7 +487,7 @@ mod tests {
                 values: vec![1.0, 1.0, 1.0],
             },
             10,
-            inverted_index,
+            &index.index,
             get_pooled_scores(),
             &is_stopped,
         );
@@ -453,42 +512,28 @@ mod tests {
     }
 
     #[test]
-    fn search_test() {
-        let mut builder = InvertedIndexBuilder::new();
-        builder.add(1, [(1, 10.0), (2, 10.0), (3, 10.0)].into());
-        builder.add(2, [(1, 20.0), (2, 20.0), (3, 20.0)].into());
-        builder.add(3, [(1, 30.0), (2, 30.0), (3, 30.0)].into());
-        let inverted_index_ram = builder.build();
+    fn search_with_update_test<I: InvertedIndex + 'static>() {
+        if TypeId::of::<I>() != TypeId::of::<InvertedIndexRam>() {
+            // Only InvertedIndexRam supports upserts
+            return;
+        }
 
-        // test with ram index
-        _search_test(&inverted_index_ram);
+        let mut index = TestIndex::<I>::from_ram({
+            let mut builder = InvertedIndexBuilder::new();
+            builder.add(1, [(1, 10.0), (2, 10.0), (3, 10.0)].into());
+            builder.add(2, [(1, 20.0), (2, 20.0), (3, 20.0)].into());
+            builder.add(3, [(1, 30.0), (2, 30.0), (3, 30.0)].into());
+            builder.build()
+        });
 
-        // test with mmap index
-        let tmp_dir_path = tempfile::Builder::new()
-            .prefix("test_index_dir")
-            .tempdir()
-            .unwrap();
-        let inverted_index_mmap =
-            InvertedIndexMmap::convert_and_save(&inverted_index_ram, &tmp_dir_path).unwrap();
-        _search_test(&inverted_index_mmap);
-    }
-
-    #[test]
-    fn search_with_update_test() {
         let is_stopped = AtomicBool::new(false);
-        let mut builder = InvertedIndexBuilder::new();
-        builder.add(1, [(1, 10.0), (2, 10.0), (3, 10.0)].into());
-        builder.add(2, [(1, 20.0), (2, 20.0), (3, 20.0)].into());
-        builder.add(3, [(1, 30.0), (2, 30.0), (3, 30.0)].into());
-        let mut inverted_index_ram = builder.build();
-
         let mut search_context = SearchContext::new(
             RemappedSparseVector {
                 indices: vec![1, 2, 3],
                 values: vec![1.0, 1.0, 1.0],
             },
             10,
-            &inverted_index_ram,
+            &index.index,
             get_pooled_scores(),
             &is_stopped,
         );
@@ -510,9 +555,10 @@ mod tests {
                 },
             ]
         );
+        drop(search_context);
 
         // update index with new point
-        inverted_index_ram.upsert(
+        index.index.upsert(
             4,
             RemappedSparseVector {
                 indices: vec![1, 2, 3],
@@ -525,7 +571,7 @@ mod tests {
                 values: vec![1.0, 1.0, 1.0],
             },
             10,
-            &inverted_index_ram,
+            &index.index,
             get_pooled_scores(),
             &is_stopped,
         );
@@ -553,7 +599,22 @@ mod tests {
         );
     }
 
-    fn _search_with_hot_key_test(inverted_index: &impl InvertedIndex) {
+    #[test]
+    fn search_with_hot_key_test<I: InvertedIndex>() {
+        let index = TestIndex::<I>::from_ram({
+            let mut builder = InvertedIndexBuilder::new();
+            builder.add(1, [(1, 10.0), (2, 10.0), (3, 10.0)].into());
+            builder.add(2, [(1, 20.0), (2, 20.0), (3, 20.0)].into());
+            builder.add(3, [(1, 30.0), (2, 30.0), (3, 30.0)].into());
+            builder.add(4, [(1, 1.0)].into());
+            builder.add(5, [(1, 2.0)].into());
+            builder.add(6, [(1, 3.0)].into());
+            builder.add(7, [(1, 4.0)].into());
+            builder.add(8, [(1, 5.0)].into());
+            builder.add(9, [(1, 6.0)].into());
+            builder.build()
+        });
+
         let is_stopped = AtomicBool::new(false);
         let mut search_context = SearchContext::new(
             RemappedSparseVector {
@@ -561,7 +622,7 @@ mod tests {
                 values: vec![1.0, 1.0, 1.0],
             },
             3,
-            inverted_index,
+            &index.index,
             get_pooled_scores(),
             &is_stopped,
         );
@@ -590,7 +651,7 @@ mod tests {
                 values: vec![1.0, 1.0, 1.0],
             },
             4,
-            inverted_index,
+            &index.index,
             get_pooled_scores(),
             &is_stopped,
         );
@@ -616,39 +677,14 @@ mod tests {
     }
 
     #[test]
-    fn search_with_hot_key_test() {
-        let mut builder = InvertedIndexBuilder::new();
-        builder.add(1, [(1, 10.0), (2, 10.0), (3, 10.0)].into());
-        builder.add(2, [(1, 20.0), (2, 20.0), (3, 20.0)].into());
-        builder.add(3, [(1, 30.0), (2, 30.0), (3, 30.0)].into());
-        builder.add(4, [(1, 1.0)].into());
-        builder.add(5, [(1, 2.0)].into());
-        builder.add(6, [(1, 3.0)].into());
-        builder.add(7, [(1, 4.0)].into());
-        builder.add(8, [(1, 5.0)].into());
-        builder.add(9, [(1, 6.0)].into());
-        let inverted_index_ram = builder.build();
-
-        // test with ram index
-        _search_with_hot_key_test(&inverted_index_ram);
-
-        // test with mmap index
-        let tmp_dir_path = tempfile::Builder::new()
-            .prefix("test_index_dir")
-            .tempdir()
-            .unwrap();
-        let inverted_index_mmap =
-            InvertedIndexMmap::convert_and_save(&inverted_index_ram, &tmp_dir_path).unwrap();
-        _search_with_hot_key_test(&inverted_index_mmap);
-    }
-
-    #[test]
-    fn pruning_single_to_end_test() {
-        let mut builder = InvertedIndexBuilder::new();
-        builder.add(1, [(1, 10.0)].into());
-        builder.add(2, [(1, 20.0)].into());
-        builder.add(3, [(1, 30.0)].into());
-        let inverted_index_ram = builder.build();
+    fn pruning_single_to_end_test<I: InvertedIndex>() {
+        let index = TestIndex::<I>::from_ram({
+            let mut builder = InvertedIndexBuilder::new();
+            builder.add(1, [(1, 10.0)].into());
+            builder.add(2, [(1, 20.0)].into());
+            builder.add(3, [(1, 30.0)].into());
+            builder.build()
+        });
 
         let is_stopped = AtomicBool::new(false);
         let mut search_context = SearchContext::new(
@@ -657,7 +693,7 @@ mod tests {
                 values: vec![1.0, 1.0, 1.0],
             },
             1,
-            &inverted_index_ram,
+            &index.index,
             get_pooled_scores(),
             &is_stopped,
         );
@@ -674,15 +710,17 @@ mod tests {
     }
 
     #[test]
-    fn pruning_multi_to_end_test() {
-        let mut builder = InvertedIndexBuilder::new();
-        builder.add(1, [(1, 10.0)].into());
-        builder.add(2, [(1, 20.0)].into());
-        builder.add(3, [(1, 30.0)].into());
-        builder.add(5, [(3, 10.0)].into());
-        builder.add(6, [(2, 20.0), (3, 20.0)].into());
-        builder.add(7, [(2, 30.0), (3, 30.0)].into());
-        let inverted_index_ram = builder.build();
+    fn pruning_multi_to_end_test<I: InvertedIndex>() {
+        let index = TestIndex::<I>::from_ram({
+            let mut builder = InvertedIndexBuilder::new();
+            builder.add(1, [(1, 10.0)].into());
+            builder.add(2, [(1, 20.0)].into());
+            builder.add(3, [(1, 30.0)].into());
+            builder.add(5, [(3, 10.0)].into());
+            builder.add(6, [(2, 20.0), (3, 20.0)].into());
+            builder.add(7, [(2, 30.0), (3, 30.0)].into());
+            builder.build()
+        });
 
         let is_stopped = AtomicBool::new(false);
         let mut search_context = SearchContext::new(
@@ -691,7 +729,7 @@ mod tests {
                 values: vec![1.0, 1.0, 1.0],
             },
             1,
-            &inverted_index_ram,
+            &index.index,
             get_pooled_scores(),
             &is_stopped,
         );
@@ -708,16 +746,22 @@ mod tests {
     }
 
     #[test]
-    fn pruning_multi_under_prune_test() {
-        let mut builder = InvertedIndexBuilder::new();
-        builder.add(1, [(1, 10.0)].into());
-        builder.add(2, [(1, 20.0)].into());
-        builder.add(3, [(1, 20.0)].into());
-        builder.add(4, [(1, 10.0)].into());
-        builder.add(5, [(3, 10.0)].into());
-        builder.add(6, [(1, 20.0), (2, 20.0), (3, 20.0)].into());
-        builder.add(7, [(1, 40.0), (2, 30.0), (3, 30.0)].into());
-        let inverted_index_ram = builder.build();
+    fn pruning_multi_under_prune_test<I: InvertedIndex>() {
+        if !I::Iter::reliable_max_next_weight() {
+            return;
+        }
+
+        let index = TestIndex::<I>::from_ram({
+            let mut builder = InvertedIndexBuilder::new();
+            builder.add(1, [(1, 10.0)].into());
+            builder.add(2, [(1, 20.0)].into());
+            builder.add(3, [(1, 20.0)].into());
+            builder.add(4, [(1, 10.0)].into());
+            builder.add(5, [(3, 10.0)].into());
+            builder.add(6, [(1, 20.0), (2, 20.0), (3, 20.0)].into());
+            builder.add(7, [(1, 40.0), (2, 30.0), (3, 30.0)].into());
+            builder.build()
+        });
 
         let is_stopped = AtomicBool::new(false);
         let mut search_context = SearchContext::new(
@@ -726,7 +770,7 @@ mod tests {
                 values: vec![1.0, 1.0, 1.0],
             },
             1,
-            &inverted_index_ram,
+            &index.index,
             get_pooled_scores(),
             &is_stopped,
         );
@@ -763,21 +807,23 @@ mod tests {
     }
 
     #[test]
-    fn promote_longest_test() {
-        let is_stopped = AtomicBool::new(false);
-        let mut builder = InvertedIndexBuilder::new();
-        builder.add(1, [(1, 10.0), (2, 10.0), (3, 10.0)].into());
-        builder.add(2, [(1, 20.0), (3, 20.0)].into());
-        builder.add(3, [(2, 30.0), (3, 30.0)].into());
-        let inverted_index_ram = builder.build();
+    fn promote_longest_test<I: InvertedIndex>() {
+        let index = TestIndex::<I>::from_ram({
+            let mut builder = InvertedIndexBuilder::new();
+            builder.add(1, [(1, 10.0), (2, 10.0), (3, 10.0)].into());
+            builder.add(2, [(1, 20.0), (3, 20.0)].into());
+            builder.add(3, [(2, 30.0), (3, 30.0)].into());
+            builder.build()
+        });
 
+        let is_stopped = AtomicBool::new(false);
         let mut search_context = SearchContext::new(
             RemappedSparseVector {
                 indices: vec![1, 2, 3],
                 values: vec![1.0, 1.0, 1.0],
             },
             3,
-            &inverted_index_ram,
+            &index.index,
             get_pooled_scores(),
             &is_stopped,
         );
@@ -800,21 +846,23 @@ mod tests {
     }
 
     #[test]
-    fn plain_search_all_test() {
-        let is_stopped = AtomicBool::new(false);
-        let mut builder = InvertedIndexBuilder::new();
-        builder.add(1, [(1, 10.0), (2, 10.0), (3, 10.0)].into());
-        builder.add(2, [(1, 20.0), (3, 20.0)].into());
-        builder.add(3, [(1, 30.0), (3, 30.0)].into());
-        let inverted_index_ram = builder.build();
+    fn plain_search_all_test<I: InvertedIndex>() {
+        let index = TestIndex::<I>::from_ram({
+            let mut builder = InvertedIndexBuilder::new();
+            builder.add(1, [(1, 10.0), (2, 10.0), (3, 10.0)].into());
+            builder.add(2, [(1, 20.0), (3, 20.0)].into());
+            builder.add(3, [(1, 30.0), (3, 30.0)].into());
+            builder.build()
+        });
 
+        let is_stopped = AtomicBool::new(false);
         let mut search_context = SearchContext::new(
             RemappedSparseVector {
                 indices: vec![1, 2, 3],
                 values: vec![1.0, 1.0, 1.0],
             },
             3,
-            &inverted_index_ram,
+            &index.index,
             get_pooled_scores(),
             &is_stopped,
         );
@@ -840,22 +888,24 @@ mod tests {
     }
 
     #[test]
-    fn plain_search_gap_test() {
-        let is_stopped = AtomicBool::new(false);
-        let mut builder = InvertedIndexBuilder::new();
-        builder.add(1, [(1, 10.0), (2, 10.0), (3, 10.0)].into());
-        builder.add(2, [(1, 20.0), (3, 20.0)].into());
-        builder.add(3, [(2, 30.0), (3, 30.0)].into());
-        let inverted_index_ram = builder.build();
+    fn plain_search_gap_test<I: InvertedIndex>() {
+        let index = TestIndex::<I>::from_ram({
+            let mut builder = InvertedIndexBuilder::new();
+            builder.add(1, [(1, 10.0), (2, 10.0), (3, 10.0)].into());
+            builder.add(2, [(1, 20.0), (3, 20.0)].into());
+            builder.add(3, [(2, 30.0), (3, 30.0)].into());
+            builder.build()
+        });
 
         // query vector has a gap for dimension 2
+        let is_stopped = AtomicBool::new(false);
         let mut search_context = SearchContext::new(
             RemappedSparseVector {
                 indices: vec![1, 3],
                 values: vec![1.0, 1.0],
             },
             3,
-            &inverted_index_ram,
+            &index.index,
             get_pooled_scores(),
             &is_stopped,
         );

@@ -18,7 +18,7 @@ use segment::segment_constructor::build_segment;
 use segment::segment_constructor::segment_builder::SegmentBuilder;
 use segment::types::{
     HnswConfig, Indexes, PayloadFieldSchema, PayloadKeyType, PayloadStorageType, PointIdType,
-    QuantizationConfig, SegmentConfig, VectorStorageType, VECTOR_ELEMENT_SIZE,
+    QuantizationConfig, SegmentConfig, VectorStorageType,
 };
 
 use crate::collection_manager::holders::proxy_segment::ProxySegment;
@@ -31,11 +31,11 @@ use crate::operations::types::{CollectionError, CollectionResult};
 
 const BYTES_IN_KB: usize = 1024;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub struct OptimizerThresholds {
-    pub max_segment_size: usize,
-    pub memmap_threshold: usize,
-    pub indexing_threshold: usize,
+    pub max_segment_size_kb: usize,
+    pub memmap_threshold_kb: usize,
+    pub indexing_threshold_kb: usize,
 }
 
 /// SegmentOptimizer - trait implementing common functionality of the optimizers
@@ -129,10 +129,8 @@ pub trait SegmentOptimizer {
             };
             let locked_segment = segment.read();
 
-            for (vector_name, dim) in locked_segment.vector_dims() {
-                let available_vectors =
-                    locked_segment.available_vector_count(&vector_name).unwrap();
-                let vector_size = dim * VECTOR_ELEMENT_SIZE * available_vectors;
+            for vector_name in locked_segment.vector_names() {
+                let vector_size = locked_segment.available_vectors_size_in_bytes(&vector_name)?;
                 let size = bytes_count_by_vector_name.entry(vector_name).or_insert(0);
                 *size += vector_size;
             }
@@ -149,10 +147,10 @@ pub trait SegmentOptimizer {
         let collection_params = self.collection_params();
 
         let threshold_is_indexed = maximal_vector_store_size_bytes
-            >= thresholds.indexing_threshold.saturating_mul(BYTES_IN_KB);
+            >= thresholds.indexing_threshold_kb.saturating_mul(BYTES_IN_KB);
 
         let threshold_is_on_disk = maximal_vector_store_size_bytes
-            >= thresholds.memmap_threshold.saturating_mul(BYTES_IN_KB);
+            >= thresholds.memmap_threshold_kb.saturating_mul(BYTES_IN_KB);
 
         let mut vector_data = collection_params.to_base_vector_data()?;
         let mut sparse_vector_data = collection_params.to_sparse_vector_data()?;
@@ -281,7 +279,7 @@ pub trait SegmentOptimizer {
                     LockedSegment::Proxy(proxy_segment) => {
                         let wrapped_segment = proxy_segment.read().wrapped_segment.clone();
                         let (restored_id, _proxies) =
-                            segments_lock.swap(wrapped_segment, &[proxy_id]);
+                            segments_lock.swap_new(wrapped_segment, &[proxy_id]);
                         restored_segment_ids.push(restored_id);
                     }
                 }
@@ -322,7 +320,7 @@ pub trait SegmentOptimizer {
         self.unwrap_proxy(segments, proxy_ids);
         if temp_segment.get().read().available_point_count() > 0 {
             let mut write_segments = segments.write();
-            write_segments.add_locked(temp_segment.clone());
+            write_segments.add_new_locked(temp_segment.clone());
         }
     }
 
@@ -365,12 +363,10 @@ pub trait SegmentOptimizer {
         }
 
         for field in proxy_deleted_indexes.read().iter() {
-            segment_builder.indexed_fields.remove(field);
+            segment_builder.remove_indexed_field(field);
         }
         for (field, schema_type) in proxy_created_indexes.read().iter() {
-            segment_builder
-                .indexed_fields
-                .insert(field.to_owned(), schema_type.to_owned());
+            segment_builder.add_indexed_field(field.to_owned(), schema_type.to_owned());
         }
 
         let mut optimized_segment: Segment = segment_builder.build(permit, stopped)?;
@@ -510,7 +506,7 @@ pub trait SegmentOptimizer {
                 // so we can afford this operation under the full collection write lock
                 let op_num = 0;
                 proxy.replicate_field_indexes(op_num)?; // Slow only in case the index is change in the gap between two calls
-                proxy_ids.push(write_segments.swap(proxy, &[idx]).0);
+                proxy_ids.push(write_segments.swap_new(proxy, &[idx]).0);
             }
             proxy_ids
         };
@@ -584,7 +580,12 @@ pub trait SegmentOptimizer {
 
             optimized_segment.prefault_mmap_pages();
 
-            let (_, proxies) = write_segments_guard.swap(optimized_segment, &proxy_ids);
+            let (_, proxies) = write_segments_guard.swap_new(optimized_segment, &proxy_ids);
+            debug_assert_eq!(
+                proxies.len(),
+                proxy_ids.len(),
+                "swapped different number of proxies on unwrap, missing or incorrect segment IDs?"
+            );
 
             let has_appendable_segments = write_segments_guard.has_appendable_segment();
 
@@ -593,7 +594,7 @@ pub trait SegmentOptimizer {
 
             // Append a temp segment to collection if it is not empty or there is no other appendable segment
             if tmp_segment.get().read().available_point_count() > 0 || !has_appendable_segments {
-                write_segments_guard.add_locked(tmp_segment);
+                write_segments_guard.add_new_locked(tmp_segment);
 
                 // unlock collection for search and updates
                 drop(write_segments_guard);

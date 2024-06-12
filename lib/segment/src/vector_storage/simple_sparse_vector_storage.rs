@@ -2,7 +2,6 @@ use std::ops::Range;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
-use atomic_refcell::AtomicRefCell;
 use bitvec::prelude::{BitSlice, BitVec};
 use common::types::PointOffsetType;
 use parking_lot::RwLock;
@@ -41,7 +40,7 @@ pub fn open_simple_sparse_vector_storage(
     database: Arc<RwLock<DB>>,
     database_column_name: &str,
     stopped: &AtomicBool,
-) -> OperationResult<Arc<AtomicRefCell<VectorStorageEnum>>> {
+) -> OperationResult<VectorStorageEnum> {
     let (mut deleted, mut deleted_count) = (BitVec::new(), 0);
     let db_wrapper = DatabaseColumnWrapper::new(database, database_column_name);
 
@@ -65,19 +64,17 @@ pub fn open_simple_sparse_vector_storage(
         check_process_stopped(stopped)?;
     }
 
-    Ok(Arc::new(AtomicRefCell::new(
-        VectorStorageEnum::SparseSimple(SimpleSparseVectorStorage {
-            db_wrapper,
-            update_buffer: StoredSparseVector {
-                deleted: false,
-                vector: SparseVector::default(),
-            },
-            deleted,
-            deleted_count,
-            total_vector_count,
-            total_sparse_size,
-        }),
-    )))
+    Ok(VectorStorageEnum::SparseSimple(SimpleSparseVectorStorage {
+        db_wrapper,
+        update_buffer: StoredSparseVector {
+            deleted: false,
+            vector: SparseVector::default(),
+        },
+        deleted,
+        deleted_count,
+        total_vector_count,
+        total_sparse_size,
+    }))
 }
 
 impl SimpleSparseVectorStorage {
@@ -124,21 +121,6 @@ impl SimpleSparseVectorStorage {
 
         Ok(())
     }
-
-    /// Estimate average vector size based on total number of non-zero elements in all vectors.
-    ///
-    /// This is needed because the optimizer relies on the vector dimension * size_of_f32 * point_count to
-    /// trigger reindexing and on_disk data move.
-    /// TODO(sparse) get a separate function to get the vector storage instead for the optimizer
-    pub fn get_average_dimension(&self) -> usize {
-        if self.total_vector_count == 0 {
-            // default dimension to play nice with optimizers
-            1
-        } else {
-            // multiply by 2 to account for indices & values
-            (self.total_sparse_size / self.total_vector_count) * 2
-        }
-    }
 }
 
 impl SparseVectorStorage for SimpleSparseVectorStorage {
@@ -154,11 +136,6 @@ impl SparseVectorStorage for SimpleSparseVectorStorage {
 }
 
 impl VectorStorage for SimpleSparseVectorStorage {
-    fn vector_dim(&self) -> usize {
-        // estimate average vector size
-        self.get_average_dimension()
-    }
-
     fn distance(&self) -> Distance {
         SPARSE_VECTOR_DISTANCE
     }
@@ -175,14 +152,20 @@ impl VectorStorage for SimpleSparseVectorStorage {
         self.total_vector_count
     }
 
+    fn available_size_in_bytes(&self) -> usize {
+        self.total_sparse_size * (std::mem::size_of::<f32>() + std::mem::size_of::<u32>())
+    }
+
     fn get_vector(&self, key: PointOffsetType) -> CowVector {
         let vector = self.get_vector_opt(key);
         debug_assert!(vector.is_some());
         vector.unwrap_or_else(CowVector::default_sparse)
     }
 
+    /// Get vector by key, if it exists.
+    ///
+    /// ignore any error
     fn get_vector_opt(&self, key: PointOffsetType) -> Option<CowVector> {
-        // ignore any error
         self.get_sparse(key).ok().map(CowVector::from)
     }
 

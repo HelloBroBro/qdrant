@@ -3,11 +3,13 @@ use common::types::ScoreType;
 use itertools::Itertools;
 use segment::data_types::order_by::OrderBy;
 use segment::data_types::vectors::{NamedQuery, NamedVectorStruct, Vector, DEFAULT_VECTOR_NAME};
-use segment::types::{Filter, ScoredPoint, SearchParams, WithPayloadInterface, WithVector};
+use segment::types::{Filter, Order, ScoredPoint, SearchParams, WithPayloadInterface, WithVector};
 use segment::vector_storage::query::{ContextQuery, DiscoveryQuery, RecoQuery};
 use tonic::Status;
 
+use crate::config::CollectionParams;
 use crate::operations::query_enum::QueryEnum;
+use crate::operations::types::CollectionResult;
 
 /// Internal response type for a universal query request.
 ///
@@ -17,7 +19,7 @@ pub type ShardQueryResponse = Vec<Vec<ScoredPoint>>;
 /// Internal representation of a universal query request.
 ///
 /// Direct translation of the user-facing request, but with all point ids substituted with their corresponding vectors.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct ShardQueryRequest {
     pub prefetches: Vec<ShardPrefetch>,
     pub query: Option<ScoringQuery>,
@@ -36,6 +38,7 @@ pub enum Fusion {
     Rrf,
 }
 
+/// Same as `Query`, but with the resolved vector references.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ScoringQuery {
     /// Score points against some vector(s)
@@ -49,6 +52,15 @@ pub enum ScoringQuery {
 }
 
 impl ScoringQuery {
+    pub fn needs_intermediate_results(&self) -> bool {
+        match self {
+            ScoringQuery::Fusion(fusion) => match fusion {
+                Fusion::Rrf => true,
+            },
+            ScoringQuery::Vector(_) | ScoringQuery::OrderBy(_) => false,
+        }
+    }
+
     /// Get the vector name if it is scored against a vector
     pub fn get_vector_name(&self) -> Option<&str> {
         match self {
@@ -56,9 +68,38 @@ impl ScoringQuery {
             _ => None,
         }
     }
+
+    /// Returns the expected order of results, depending on the type of query
+    pub fn order(
+        opt_self: Option<&Self>,
+        collection_params: &CollectionParams,
+    ) -> CollectionResult<Order> {
+        let order = match opt_self {
+            Some(scoring_query) => match scoring_query {
+                ScoringQuery::Vector(query_enum) => {
+                    if query_enum.is_distance_scored() {
+                        collection_params
+                            .get_distance(query_enum.get_vector_name())?
+                            .distance_order()
+                    } else {
+                        Order::LargeBetter
+                    }
+                }
+                ScoringQuery::Fusion(fusion) => match fusion {
+                    Fusion::Rrf => Order::LargeBetter,
+                },
+                ScoringQuery::OrderBy(order_by) => Order::from(order_by.direction()),
+            },
+            None => {
+                // Order by ID
+                Order::SmallBetter
+            }
+        };
+        Ok(order)
+    }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct ShardPrefetch {
     pub prefetches: Vec<ShardPrefetch>,
     pub query: Option<ScoringQuery>,
@@ -66,6 +107,33 @@ pub struct ShardPrefetch {
     pub params: Option<SearchParams>,
     pub filter: Option<Filter>,
     pub score_threshold: Option<ScoreType>,
+}
+
+impl ShardQueryRequest {
+    pub fn filter_refs(&self) -> Vec<Option<&Filter>> {
+        let mut filters = vec![];
+        filters.push(self.filter.as_ref());
+
+        for prefetch in &self.prefetches {
+            filters.extend(prefetch.filter_refs())
+        }
+
+        filters
+    }
+}
+
+impl ShardPrefetch {
+    fn filter_refs(&self) -> Vec<Option<&Filter>> {
+        let mut filters = vec![];
+
+        filters.push(self.filter.as_ref());
+
+        for prefetch in &self.prefetches {
+            filters.extend(prefetch.filter_refs())
+        }
+
+        filters
+    }
 }
 
 impl TryFrom<grpc::QueryShardPoints> for ShardQueryRequest {

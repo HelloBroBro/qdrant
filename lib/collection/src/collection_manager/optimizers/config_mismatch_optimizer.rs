@@ -6,7 +6,7 @@ use std::sync::Arc;
 use parking_lot::Mutex;
 use segment::common::operation_time_statistics::OperationDurationsAggregator;
 use segment::index::sparse_index::sparse_index_config::SparseIndexType;
-use segment::types::{HnswConfig, Indexes, QuantizationConfig, SegmentType, VECTOR_ELEMENT_SIZE};
+use segment::types::{HnswConfig, Indexes, QuantizationConfig, SegmentType};
 
 use crate::collection_manager::holders::segment_holder::{LockedSegmentHolder, SegmentId};
 use crate::collection_manager::optimizers::segment_optimizer::{
@@ -110,15 +110,9 @@ impl ConfigMismatchOptimizer {
             .filter_map(|(idx, segment)| {
                 let segment_entry = segment.get();
                 let read_segment = segment_entry.read();
-                let point_count = read_segment.available_point_count();
-                let vector_size = point_count
-                    * read_segment
-                        .vector_dims()
-                        .values()
-                        .max()
-                        .copied()
-                        .unwrap_or(0)
-                    * VECTOR_ELEMENT_SIZE;
+                let vector_size = read_segment
+                    .max_available_vectors_size_in_bytes()
+                    .unwrap_or_default();
 
                 let segment_config = read_segment.config();
 
@@ -302,9 +296,9 @@ mod tests {
         // Collection configuration
         let (point_count, dim) = (1000, 10);
         let thresholds_config = OptimizerThresholds {
-            max_segment_size: usize::MAX,
-            memmap_threshold: usize::MAX,
-            indexing_threshold: 10,
+            max_segment_size_kb: usize::MAX,
+            memmap_threshold_kb: usize::MAX,
+            indexing_threshold_kb: 10,
         };
         let collection_params = CollectionParams {
             vectors: VectorsConfig::Single(
@@ -320,7 +314,7 @@ mod tests {
 
         let segment = random_segment(dir.path(), 100, point_count, dim as usize);
 
-        let segment_id = holder.add(segment);
+        let segment_id = holder.add_new(segment);
         let locked_holder: Arc<RwLock<_>> = Arc::new(RwLock::new(holder));
 
         let hnsw_config = HnswConfig {
@@ -335,7 +329,7 @@ mod tests {
         // Optimizers used in test
         let index_optimizer = IndexingOptimizer::new(
             2,
-            thresholds_config.clone(),
+            thresholds_config,
             dir.path().to_owned(),
             temp_dir.path().to_owned(),
             collection_params.clone(),
@@ -436,9 +430,9 @@ mod tests {
         // Collection configuration
         let (point_count, vector1_dim, vector2_dim) = (1000, 10, 20);
         let thresholds_config = OptimizerThresholds {
-            max_segment_size: usize::MAX,
-            memmap_threshold: usize::MAX,
-            indexing_threshold: 10,
+            max_segment_size_kb: usize::MAX,
+            memmap_threshold_kb: usize::MAX,
+            indexing_threshold_kb: 10,
         };
         let hnsw_config_vector1 = HnswConfigDiff {
             m: Some(10),
@@ -475,7 +469,7 @@ mod tests {
             vector2_dim as usize,
         );
 
-        let segment_id = holder.add(segment);
+        let segment_id = holder.add_new(segment);
         let locked_holder: Arc<RwLock<_>> = Arc::new(RwLock::new(holder));
 
         let hnsw_config_collection = HnswConfig {
@@ -493,7 +487,7 @@ mod tests {
         // Optimizers used in test
         let index_optimizer = IndexingOptimizer::new(
             2,
-            thresholds_config.clone(),
+            thresholds_config,
             dir.path().to_owned(),
             temp_dir.path().to_owned(),
             collection_params.clone(),
@@ -604,9 +598,9 @@ mod tests {
         // Collection configuration
         let (point_count, vector1_dim, vector2_dim) = (1000, 10, 20);
         let thresholds_config = OptimizerThresholds {
-            max_segment_size: usize::MAX,
-            memmap_threshold: usize::MAX,
-            indexing_threshold: 10,
+            max_segment_size_kb: usize::MAX,
+            memmap_threshold_kb: usize::MAX,
+            indexing_threshold_kb: 10,
         };
         let quantization_config_vector1 =
             QuantizationConfig::Scalar(segment::types::ScalarQuantization {
@@ -645,7 +639,7 @@ mod tests {
             vector2_dim as usize,
         );
 
-        let segment_id = holder.add(segment);
+        let segment_id = holder.add_new(segment);
         let locked_holder: Arc<RwLock<_>> = Arc::new(RwLock::new(holder));
 
         let quantization_config_collection =
@@ -660,7 +654,7 @@ mod tests {
         // Optimizers used in test
         let index_optimizer = IndexingOptimizer::new(
             2,
-            thresholds_config.clone(),
+            thresholds_config,
             dir.path().to_owned(),
             temp_dir.path().to_owned(),
             collection_params.clone(),

@@ -14,6 +14,7 @@ use collection::operations::types::{
     AliasDescription, CollectionClusterInfo, CollectionInfo, CollectionsAliasesResponse,
 };
 use collection::shards::replica_set;
+use collection::shards::resharding::ReshardKey;
 use collection::shards::shard::{PeerId, ShardId, ShardsPlacement};
 use collection::shards::transfer::{ShardTransfer, ShardTransferKey, ShardTransferRestart};
 use itertools::Itertools;
@@ -566,11 +567,11 @@ pub async fn do_update_collection_cluster(
                 .submit_collection_meta_op(
                     CollectionMetaOperations::Resharding(
                         collection_name.clone(),
-                        ReshardingOperation::Start {
+                        ReshardingOperation::Start(ReshardKey {
                             peer_id,
                             shard_id,
                             shard_key,
-                        },
+                        }),
                     ),
                     access,
                     wait_timeout,
@@ -578,7 +579,7 @@ pub async fn do_update_collection_cluster(
                 .await
         }
         ClusterOperations::AbortResharding(_) => {
-            let Some(state) = collection.resharding_state() else {
+            let Some(state) = collection.resharding_state().await else {
                 return Err(StorageError::bad_request(format!(
                     "resharding is not in progress for collection {collection_name}"
                 )));
@@ -588,11 +589,11 @@ pub async fn do_update_collection_cluster(
                 .submit_collection_meta_op(
                     CollectionMetaOperations::Resharding(
                         collection_name.clone(),
-                        ReshardingOperation::Abort {
+                        ReshardingOperation::Abort(ReshardKey {
                             peer_id: state.peer_id,
                             shard_id: state.shard_id,
                             shard_key: state.shard_key.clone(),
-                        },
+                        }),
                     ),
                     access,
                     wait_timeout,

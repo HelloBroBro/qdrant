@@ -234,7 +234,7 @@ mod tests {
         let temp_dir = Builder::new().prefix("segment_temp_dir").tempdir().unwrap();
         let dir = Builder::new().prefix("segment_dir").tempdir().unwrap();
         let mut holder = SegmentHolder::default();
-        let segment_id = holder.add(random_segment(dir.path(), 100, 200, 4));
+        let segment_id = holder.add_new(random_segment(dir.path(), 100, 200, 4));
 
         let segment = holder.get(segment_id).unwrap();
 
@@ -293,9 +293,9 @@ mod tests {
             0.2,
             50,
             OptimizerThresholds {
-                max_segment_size: 1000000,
-                memmap_threshold: 1000000,
-                indexing_threshold: 1000000,
+                max_segment_size_kb: 1000000,
+                memmap_threshold_kb: 1000000,
+                indexing_threshold_kb: 1000000,
             },
             dir.path().to_owned(),
             temp_dir.path().to_owned(),
@@ -384,9 +384,9 @@ mod tests {
         // Collection configuration
         let (point_count, vector1_dim, vector2_dim) = (1000, 10, 20);
         let thresholds_config = OptimizerThresholds {
-            max_segment_size: usize::MAX,
-            memmap_threshold: usize::MAX,
-            indexing_threshold: 10,
+            max_segment_size_kb: usize::MAX,
+            memmap_threshold_kb: usize::MAX,
+            indexing_threshold_kb: 10,
         };
         let collection_params = CollectionParams {
             vectors: VectorsConfig::Multi(BTreeMap::from([
@@ -423,7 +423,7 @@ mod tests {
             )
             .unwrap();
 
-        let mut segment_id = holder.add(segment);
+        let mut segment_id = holder.add_new(segment);
         let locked_holder: Arc<RwLock<_>> = Arc::new(RwLock::new(holder));
 
         let hnsw_config = HnswConfig {
@@ -441,7 +441,7 @@ mod tests {
         // Optimizers used in test
         let index_optimizer = IndexingOptimizer::new(
             2,
-            thresholds_config.clone(),
+            thresholds_config,
             dir.path().to_owned(),
             temp_dir.path().to_owned(),
             collection_params.clone(),

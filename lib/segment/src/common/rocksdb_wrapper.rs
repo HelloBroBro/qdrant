@@ -166,9 +166,10 @@ impl DatabaseColumnWrapper {
     {
         let db = self.database.read();
         let cf_handle = self.get_column_family(&db)?;
-        db.delete_cf(cf_handle, key).map_err(|err| {
-            OperationError::service_error(format!("RocksDB delete_cf error: {err}"))
-        })?;
+        db.delete_cf_opt(cf_handle, key, &Self::get_write_options())
+            .map_err(|err| {
+                OperationError::service_error(format!("RocksDB delete_cf error: {err}"))
+            })?;
         Ok(())
     }
 
@@ -237,7 +238,8 @@ impl DatabaseColumnWrapper {
     fn get_write_options() -> WriteOptions {
         let mut write_options = WriteOptions::default();
         write_options.set_sync(false);
-        write_options.disable_wal(true);
+        // RocksDB WAL is required for durability even if data is flushed
+        write_options.disable_wal(false);
         write_options
     }
 

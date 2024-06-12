@@ -1,10 +1,16 @@
-use std::ops::ControlFlow;
-
 use common::types::PointOffsetType;
 
 use crate::common::types::DimWeight;
 
 pub const DEFAULT_MAX_NEXT_WEIGHT: DimWeight = f32::NEG_INFINITY;
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct GenericPostingElement<W> {
+    /// Record ID
+    pub record_id: PointOffsetType,
+    /// Weight of the record in the dimension
+    pub weight: W,
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct PostingElement {
@@ -58,9 +64,13 @@ pub trait PostingListIter {
 
     fn current_index(&self) -> usize;
 
-    fn try_for_each<F, R>(&mut self, f: F) -> ControlFlow<R>
-    where
-        F: FnMut(PostingElement) -> ControlFlow<R>;
+    /// Iterate over the posting list until `id` is reached (inclusive).
+    fn for_each_till_id<Ctx: ?Sized>(
+        &mut self,
+        id: PointOffsetType,
+        ctx: &mut Ctx,
+        f: impl FnMut(&mut Ctx, PointOffsetType, DimWeight),
+    );
 
     /// Whether the max_next_weight is reliable.
     fn reliable_max_next_weight() -> bool;

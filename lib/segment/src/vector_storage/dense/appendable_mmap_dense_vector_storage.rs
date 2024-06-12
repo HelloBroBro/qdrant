@@ -3,9 +3,7 @@ use std::fs::create_dir_all;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
-use std::sync::Arc;
 
-use atomic_refcell::AtomicRefCell;
 use bitvec::prelude::BitSlice;
 use common::types::PointOffsetType;
 
@@ -33,24 +31,22 @@ pub fn open_appendable_memmap_vector_storage(
     path: &Path,
     dim: usize,
     distance: Distance,
-) -> OperationResult<Arc<AtomicRefCell<VectorStorageEnum>>> {
+) -> OperationResult<VectorStorageEnum> {
     let storage =
         open_appendable_memmap_vector_storage_impl::<VectorElementType>(path, dim, distance)?;
 
-    Ok(Arc::new(AtomicRefCell::new(
-        VectorStorageEnum::DenseAppendableMemmap(Box::new(storage)),
-    )))
+    Ok(VectorStorageEnum::DenseAppendableMemmap(Box::new(storage)))
 }
 
 pub fn open_appendable_memmap_vector_storage_byte(
     path: &Path,
     dim: usize,
     distance: Distance,
-) -> OperationResult<Arc<AtomicRefCell<VectorStorageEnum>>> {
+) -> OperationResult<VectorStorageEnum> {
     let storage = open_appendable_memmap_vector_storage_impl(path, dim, distance)?;
 
-    Ok(Arc::new(AtomicRefCell::new(
-        VectorStorageEnum::DenseAppendableMemmapByte(Box::new(storage)),
+    Ok(VectorStorageEnum::DenseAppendableMemmapByte(Box::new(
+        storage,
     )))
 }
 
@@ -58,11 +54,11 @@ pub fn open_appendable_memmap_vector_storage_half(
     path: &Path,
     dim: usize,
     distance: Distance,
-) -> OperationResult<Arc<AtomicRefCell<VectorStorageEnum>>> {
+) -> OperationResult<VectorStorageEnum> {
     let storage = open_appendable_memmap_vector_storage_impl(path, dim, distance)?;
 
-    Ok(Arc::new(AtomicRefCell::new(
-        VectorStorageEnum::DenseAppendableMemmapHalf(Box::new(storage)),
+    Ok(VectorStorageEnum::DenseAppendableMemmapHalf(Box::new(
+        storage,
     )))
 }
 
@@ -111,16 +107,16 @@ impl<T: PrimitiveVectorElement> AppendableMmapDenseVectorStorage<T> {
 }
 
 impl<T: PrimitiveVectorElement> DenseVectorStorage<T> for AppendableMmapDenseVectorStorage<T> {
+    fn vector_dim(&self) -> usize {
+        self.vectors.dim()
+    }
+
     fn get_dense(&self, key: PointOffsetType) -> &[T] {
         self.vectors.get(key).expect("mmap vector not found")
     }
 }
 
 impl<T: PrimitiveVectorElement> VectorStorage for AppendableMmapDenseVectorStorage<T> {
-    fn vector_dim(&self) -> usize {
-        self.vectors.dim()
-    }
-
     fn distance(&self) -> Distance {
         self.distance
     }
@@ -137,8 +133,18 @@ impl<T: PrimitiveVectorElement> VectorStorage for AppendableMmapDenseVectorStora
         self.vectors.len()
     }
 
+    fn available_size_in_bytes(&self) -> usize {
+        self.available_vector_count() * self.vector_dim() * std::mem::size_of::<T>()
+    }
+
     fn get_vector(&self, key: PointOffsetType) -> CowVector {
-        CowVector::from(T::slice_to_float_cow(self.get_dense(key).into()))
+        self.get_vector_opt(key).expect("vector not found")
+    }
+
+    fn get_vector_opt(&self, key: PointOffsetType) -> Option<CowVector> {
+        self.vectors
+            .get(key)
+            .map(|slice| CowVector::from(T::slice_to_float_cow(slice.into())))
     }
 
     fn insert_vector(&mut self, key: PointOffsetType, vector: VectorRef) -> OperationResult<()> {

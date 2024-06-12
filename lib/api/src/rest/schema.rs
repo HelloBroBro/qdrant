@@ -8,6 +8,7 @@ use segment::json_path::JsonPath;
 use segment::types::{Filter, SearchParams, ShardKey, WithPayloadInterface, WithVector};
 use serde::{Deserialize, Serialize};
 use sparse::common::sparse_vector::SparseVector;
+use validator::Validate;
 
 /// Type for dense vector
 pub type DenseVector = Vec<segment::data_types::vectors::VectorElementType>;
@@ -155,7 +156,7 @@ pub enum OrderByInterface {
 }
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
-#[serde(untagged, rename_all = "snake_case")]
+#[serde(rename_all = "snake_case")]
 pub enum Fusion {
     /// Reciprocal rank fusion
     Rrf,
@@ -164,26 +165,29 @@ pub enum Fusion {
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 #[serde(untagged)]
 pub enum VectorInput {
-    Id(segment::types::PointIdType),
     DenseVector(DenseVector),
     SparseVector(SparseVector),
     MultiDenseVector(MultiDenseVector),
+    Id(segment::types::PointIdType),
 }
 
-#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, JsonSchema, Validate)]
 pub struct QueryRequestInternal {
-    /// Sub-requests to perform first. If present, the query will be performed on the results of the prefetches.
-    #[serde(with = "MaybeOneOrMany")]
+    /// Sub-requests to perform first. If present, the query will be performed on the results of the prefetch(es).
+    #[validate]
+    #[serde(default, with = "MaybeOneOrMany")]
     #[schemars(with = "MaybeOneOrMany<Prefetch>")]
     pub prefetch: Option<Vec<Prefetch>>,
 
-    /// Query to perform. If missing, returns points ordered by their IDs.
+    /// Query to perform. If missing without prefetches, returns points ordered by their IDs.
+    #[validate]
     pub query: Option<QueryInterface>,
 
-    /// Define which vector to use for querying. If missing, the default vector is used.
+    /// Define which vector name to use for querying. If missing, the default vector is used.
     pub using: Option<String>,
 
     /// Filter conditions - return only those points that satisfy the specified conditions.
+    #[validate]
     pub filter: Option<Filter>,
 
     /// Search params for when there is no prefetch
@@ -192,7 +196,7 @@ pub struct QueryRequestInternal {
     /// Return points with scores better than this threshold.
     pub score_threshold: Option<ScoreType>,
 
-    /// Max number of points. Default is 10.
+    /// Max number of points to return. Default is 10.
     pub limit: Option<usize>,
 
     /// Offset of the result. Skip this many points. Default is 0
@@ -205,8 +209,9 @@ pub struct QueryRequestInternal {
     pub with_payload: Option<WithPayloadInterface>,
 }
 
-#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, JsonSchema, Validate)]
 pub struct QueryRequest {
+    #[validate]
     #[serde(flatten)]
     pub internal: QueryRequestInternal,
     pub shard_key: Option<ShardKeySelector>,
@@ -241,20 +246,23 @@ pub enum Query {
     Fusion(Fusion),
 }
 
-#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, JsonSchema, Validate)]
 pub struct Prefetch {
     /// Sub-requests to perform first. If present, the query will be performed on the results of the prefetches.
-    #[serde(with = "MaybeOneOrMany")]
+    #[validate]
+    #[serde(default, with = "MaybeOneOrMany")]
     #[schemars(with = "MaybeOneOrMany<Prefetch>")]
     pub prefetch: Option<Vec<Prefetch>>,
 
-    /// Query to perform. If missing, returns points ordered by their IDs.
+    /// Query to perform. If missing without prefetches, returns points ordered by their IDs.
+    #[validate]
     pub query: Option<QueryInterface>,
 
-    /// Define which vector to use for querying. If missing, the default vector is used.
+    /// Define which vector name to use for querying. If missing, the default vector is used.
     pub using: Option<String>,
 
     /// Filter conditions - return only those points that satisfy the specified conditions.
+    #[validate]
     pub filter: Option<Filter>,
 
     /// Search params for when there is no prefetch
@@ -263,7 +271,7 @@ pub struct Prefetch {
     /// Return points with scores better than this threshold.
     pub score_threshold: Option<ScoreType>,
 
-    /// Max number of points. Default is 10.
+    /// Max number of points to return. Default is 10.
     pub limit: Option<usize>,
 }
 
@@ -287,39 +295,58 @@ pub enum RecommendStrategy {
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct RecommendInput {
     /// Look for vectors closest to the vectors from these points
-    pub positives: Option<Vec<VectorInput>>,
+    pub positive: Option<Vec<VectorInput>>,
 
     /// Try to avoid vectors like the vector from these points
-    pub negatives: Option<Vec<VectorInput>>,
+    pub negative: Option<Vec<VectorInput>>,
 
     /// How to use the provided vectors to find the results
     pub strategy: Option<RecommendStrategy>,
 }
 
-#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+impl RecommendInput {
+    pub fn iter(&self) -> impl Iterator<Item = &VectorInput> {
+        self.positive
+            .iter()
+            .flatten()
+            .chain(self.negative.iter().flatten())
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema, Validate)]
 pub struct DiscoverInput {
     /// Use this as the primary search objective
+    #[validate]
     pub target: VectorInput,
 
     /// Search space will be constrained by these pairs of vectors
+    #[validate]
     #[serde(with = "MaybeOneOrMany")]
     #[schemars(with = "MaybeOneOrMany<ContextPair>")]
-    pub context_pairs: Option<Vec<ContextPair>>,
+    pub context: Option<Vec<ContextPair>>,
 }
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
-pub struct ContextInput {
+pub struct ContextInput(
     /// Search space will be constrained by these pairs of vectors
     #[serde(with = "MaybeOneOrMany")]
     #[schemars(with = "MaybeOneOrMany<ContextPair>")]
-    pub pairs: Option<Vec<ContextPair>>,
-}
+    pub Option<Vec<ContextPair>>,
+);
 
-#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, JsonSchema, Validate)]
 pub struct ContextPair {
     /// A positive vector
+    #[validate]
     pub positive: VectorInput,
 
     /// Repel from this vector
+    #[validate]
     pub negative: VectorInput,
+}
+
+impl ContextPair {
+    pub fn iter(&self) -> impl Iterator<Item = &VectorInput> {
+        std::iter::once(&self.positive).chain(std::iter::once(&self.negative))
+    }
 }

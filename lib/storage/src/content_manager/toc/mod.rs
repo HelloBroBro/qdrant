@@ -58,7 +58,7 @@ pub const FULL_SNAPSHOT_FILE_NAME: &str = "full-snapshot";
 /// the launch of the service.
 pub struct TableOfContent {
     collections: Arc<RwLock<Collections>>,
-    pub(super) storage_config: Arc<StorageConfig>,
+    pub(crate) storage_config: Arc<StorageConfig>,
     search_runtime: Runtime,
     update_runtime: Runtime,
     general_runtime: Runtime,
@@ -161,6 +161,7 @@ impl TableOfContent {
                 Some(search_runtime.handle().clone()),
                 Some(update_runtime.handle().clone()),
                 optimizer_cpu_budget.clone(),
+                storage_config.optimizers_overwrite.clone(),
             ));
 
             collections.insert(collection_name, collection);

@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::io;
 use std::path::Path;
 use std::sync::atomic::AtomicBool;
@@ -135,30 +136,68 @@ pub fn run_bench(
     );
 
     run_bench2(
-        c.benchmark_group(format!("search/ram_c/{name}")),
-        &InvertedIndexImmutableRam::from_ram_index(index.clone(), "nonexistent/path").unwrap(),
+        c.benchmark_group(format!("search/ram_c32/{name}")),
+        &InvertedIndexImmutableRam::<f32>::from_ram_index(
+            Cow::Borrowed(&index),
+            "nonexistent/path",
+        )
+        .unwrap(),
         query_vectors,
         &hottest_query_vectors,
     );
 
-    let tmp_dir_path = tempfile::Builder::new()
-        .prefix("test_index_dir1")
-        .tempdir()
-        .unwrap();
+    run_bench2(
+        c.benchmark_group(format!("search/ram_c16/{name}")),
+        &InvertedIndexImmutableRam::<half::f16>::from_ram_index(
+            Cow::Borrowed(&index),
+            "nonexistent/path",
+        )
+        .unwrap(),
+        query_vectors,
+        &hottest_query_vectors,
+    );
+
     run_bench2(
         c.benchmark_group(format!("search/mmap/{name}")),
-        &InvertedIndexMmap::from_ram_index(index.clone(), tmp_dir_path.path()).unwrap(),
+        &InvertedIndexMmap::from_ram_index(
+            Cow::Borrowed(&index),
+            tempfile::Builder::new()
+                .prefix("test_index_dir")
+                .tempdir()
+                .unwrap()
+                .path(),
+        )
+        .unwrap(),
         query_vectors,
         &hottest_query_vectors,
     );
 
-    let tmp_dir_path = tempfile::Builder::new()
-        .prefix("test_index_dir2")
-        .tempdir()
-        .unwrap();
     run_bench2(
-        c.benchmark_group(format!("search/mmap_c/{name}")),
-        &InvertedIndexCompressedMmap::from_ram_index(index, tmp_dir_path.path()).unwrap(),
+        c.benchmark_group(format!("search/mmap_c32/{name}")),
+        &InvertedIndexCompressedMmap::<f32>::from_ram_index(
+            Cow::Borrowed(&index),
+            tempfile::Builder::new()
+                .prefix("test_index_dir")
+                .tempdir()
+                .unwrap()
+                .path(),
+        )
+        .unwrap(),
+        query_vectors,
+        &hottest_query_vectors,
+    );
+
+    run_bench2(
+        c.benchmark_group(format!("search/mmap_c16/{name}")),
+        &InvertedIndexCompressedMmap::<half::f16>::from_ram_index(
+            Cow::Borrowed(&index),
+            tempfile::Builder::new()
+                .prefix("test_index_dir")
+                .tempdir()
+                .unwrap()
+                .path(),
+        )
+        .unwrap(),
         query_vectors,
         &hottest_query_vectors,
     );

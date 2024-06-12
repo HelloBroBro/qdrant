@@ -1,6 +1,7 @@
 #[cfg(not(target_os = "windows"))]
 mod prof;
 
+use std::borrow::Cow;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
@@ -53,23 +54,23 @@ fn sparse_vector_index_build_benchmark(c: &mut Criterion) {
     let wrapped_payload_index = Arc::new(AtomicRefCell::new(payload_index));
 
     let db = open_db(storage_dir.path(), &[DB_VECTOR_CF]).unwrap();
-    let vector_storage = open_simple_sparse_vector_storage(db, DB_VECTOR_CF, &stopped).unwrap();
-    let mut borrowed_storage = vector_storage.borrow_mut();
+    let mut vector_storage = open_simple_sparse_vector_storage(db, DB_VECTOR_CF, &stopped).unwrap();
 
     // add points to storage only once
     for idx in 0..NUM_VECTORS {
         let vec = &random_sparse_vector(&mut rnd, MAX_SPARSE_DIM);
-        borrowed_storage
+        vector_storage
             .insert_vector(idx as PointOffsetType, vec.into())
             .unwrap();
     }
-    drop(borrowed_storage);
 
     // save index config to disk
     let index_config = SparseIndexConfig::new(Some(10_000), SparseIndexType::ImmutableRam);
 
     let permit_cpu_count = num_rayon_threads(0);
     let permit = Arc::new(CpuPermit::dummy(permit_cpu_count as u32));
+
+    let vector_storage = Arc::new(AtomicRefCell::new(vector_storage));
 
     let mut sparse_vector_index: SparseVectorIndex<InvertedIndexRam> = SparseVectorIndex::open(
         index_config,
@@ -108,8 +109,8 @@ fn sparse_vector_index_build_benchmark(c: &mut Criterion) {
     group.bench_function("convert-mmap-index", |b| {
         b.iter(|| {
             let mmap_index_dir = Builder::new().prefix("mmap_index_dir").tempdir().unwrap();
-            let mmap_inverted_index = InvertedIndexMmap::convert_and_save(
-                sparse_vector_index.inverted_index(),
+            let mmap_inverted_index = InvertedIndexMmap::from_ram_index(
+                Cow::Borrowed(sparse_vector_index.inverted_index()),
                 &mmap_index_dir,
             )
             .unwrap();

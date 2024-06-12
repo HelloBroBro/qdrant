@@ -2,7 +2,6 @@ use std::cmp::Ordering;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt::{Display, Formatter};
 use std::hash::Hash;
-use std::mem::size_of;
 use std::ops::Deref;
 use std::rc::Rc;
 use std::str::FromStr;
@@ -27,7 +26,7 @@ use crate::common::utils::{self, MaybeOneOrMany, MultiValue};
 use crate::data_types::integer_index::IntegerIndexParams;
 use crate::data_types::order_by::OrderValue;
 use crate::data_types::text_index::TextIndexParams;
-use crate::data_types::vectors::{VectorElementType, VectorStruct};
+use crate::data_types::vectors::VectorStruct;
 use crate::index::sparse_index::sparse_index_config::SparseIndexConfig;
 use crate::json_path::{JsonPath, JsonPathInterface};
 use crate::spaces::metric::MetricPostProcessing;
@@ -79,8 +78,6 @@ impl From<chrono::DateTime<chrono::Utc>> for DateTimeWrapper {
         DateTimeWrapper(dt)
     }
 }
-
-pub const VECTOR_ELEMENT_SIZE: usize = size_of::<VectorElementType>();
 
 /// Type, used for specifying point ID in user interface
 #[derive(Debug, Serialize, Copy, Clone, PartialEq, Eq, Hash, Ord, PartialOrd, JsonSchema)]
@@ -192,6 +189,7 @@ impl Distance {
     }
 }
 
+#[derive(Debug, PartialEq)]
 pub enum Order {
     LargeBetter,
     SmallBetter,
@@ -385,6 +383,10 @@ pub struct CollectionConfigDefaults {
     pub shard_number: u32,
 
     #[validate(range(min = 1))]
+    #[serde(default = "default_shard_number_per_node_const")]
+    pub shard_number_per_node: u32,
+
+    #[validate(range(min = 1))]
     #[serde(default = "default_replication_factor_const")]
     pub replication_factor: u32,
 
@@ -398,6 +400,10 @@ pub struct CollectionConfigDefaults {
 pub struct VectorsConfigDefaults {
     #[serde(default)]
     pub on_disk: Option<bool>,
+}
+
+pub const fn default_shard_number_per_node_const() -> u32 {
+    1
 }
 
 pub const fn default_shard_number_const() -> u32 {
@@ -756,6 +762,20 @@ impl SegmentConfig {
                 .sparse_vector_data
                 .values()
                 .any(|config| config.index.index_type.is_on_disk())
+    }
+
+    pub fn is_appendable(&self) -> bool {
+        self.vector_data
+            .values()
+            .map(|vector_config| vector_config.is_appendable())
+            .chain(
+                self.sparse_vector_data
+                    .values()
+                    .map(|sparse_vector_config| {
+                        sparse_vector_config.index.index_type.is_appendable()
+                    }),
+            )
+            .all(|v| v)
     }
 }
 

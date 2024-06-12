@@ -39,10 +39,16 @@ impl TableOfContent {
                         .sharding_method
                         .unwrap_or_default()
                     {
-                        ShardingMethod::Auto => CollectionShardDistribution::all_local(
-                            operation.create_collection.shard_number,
-                            self.this_peer_id,
-                        ),
+                        ShardingMethod::Auto => {
+                            let shard_number =
+                                operation.create_collection.shard_number.or_else(|| {
+                                    self.storage_config
+                                        .collection
+                                        .as_ref()
+                                        .map(|i| i.shard_number_per_node)
+                                });
+                            CollectionShardDistribution::all_local(shard_number, self.this_peer_id)
+                        }
                         ShardingMethod::Custom => ShardDistributionProposal::empty().into(),
                     },
                     Some(distribution) => distribution.into(),
@@ -268,30 +274,66 @@ impl TableOfContent {
 
     async fn handle_resharding(
         &self,
-        collection: CollectionId,
+        collection_id: CollectionId,
         operation: ReshardingOperation,
     ) -> Result<(), StorageError> {
-        let collection = self.get_collection_unchecked(&collection).await?;
+        let collection = self.get_collection_unchecked(&collection_id).await?;
+        let proposal_sender = if let Some(proposal_sender) = self.consensus_proposal_sender.clone()
+        {
+            proposal_sender
+        } else {
+            return Err(StorageError::service_error(
+                "Can't handle resharding, this is a single node deployment",
+            ));
+        };
 
         match operation {
-            ReshardingOperation::Start {
-                peer_id,
-                shard_id,
-                shard_key,
-            } => {
+            ReshardingOperation::Start(key) => {
+                let consensus = match self.shard_transfer_dispatcher.lock().as_ref() {
+                    Some(consensus) => Box::new(consensus.clone()),
+                    None => {
+                        return Err(StorageError::service_error(
+                            "Can't handle transfer, this is a single node deployment",
+                        ))
+                    }
+                };
+
+                let on_finish = {
+                    let collection_id = collection_id.clone();
+                    let key = key.clone();
+                    let proposal_sender = proposal_sender.clone();
+                    async move {
+                        let operation = ConsensusOperations::finish_resharding(collection_id, key);
+                        if let Err(error) = proposal_sender.send(operation) {
+                            log::error!("Can't report resharding progress to consensus: {error}");
+                        };
+                    }
+                };
+
+                let on_failure = {
+                    let collection_id = collection_id.clone();
+                    let key = key.clone();
+                    async move {
+                        if let Err(error) = proposal_sender
+                            .send(ConsensusOperations::abort_resharding(collection_id, key))
+                        {
+                            log::error!("Can't report resharding progress to consensus: {error}");
+                        };
+                    }
+                };
+
+                let temp_dir = self.optional_temp_or_storage_temp_path()?;
                 collection
-                    .start_resharding(peer_id, shard_id, shard_key)
+                    .start_resharding(key, consensus, temp_dir, on_finish, on_failure)
                     .await?;
             }
 
-            ReshardingOperation::Abort {
-                peer_id,
-                shard_id,
-                shard_key,
-            } => {
-                collection
-                    .abort_resharding(peer_id, shard_id, shard_key)
-                    .await?;
+            ReshardingOperation::CommitHashRing(key) => {
+                collection.commit_hashring(key).await?;
+            }
+
+            ReshardingOperation::Abort(key) => {
+                collection.abort_resharding(key).await?;
             }
         }
 
@@ -357,7 +399,7 @@ impl TableOfContent {
                             ConsensusOperations::finish_transfer(collection_id, transfer);
 
                         if let Err(error) = proposal_sender.send(operation) {
-                            log::error!("Can't report transfer progress to consensus: {}", error)
+                            log::error!("Can't report transfer progress to consensus: {error}");
                         };
                     }
                 };
@@ -373,7 +415,7 @@ impl TableOfContent {
                                 "transmission failed",
                             ))
                         {
-                            log::error!("Can't report transfer progress to consensus: {}", error)
+                            log::error!("Can't report transfer progress to consensus: {error}");
                         };
                     }
                 };
@@ -494,7 +536,7 @@ impl TableOfContent {
                 }
 
                 log::debug!(
-                    "Set shard replica state from {current_state:?} to {:?} after snapshot recovery",
+                    "Set shard replica state from {current_state:?} to {:?}",
                     ReplicaState::Partial,
                 );
 

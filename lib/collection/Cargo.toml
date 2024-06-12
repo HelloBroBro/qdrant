@@ -11,11 +11,12 @@ edition = "2021"
 [features]
 testing = []
 tracing = ["dep:tracing", "api/tracing", "segment/tracing"]
+data-consistency-check = []
 
 [dev-dependencies]
 criterion = "0.5"
 proptest = "1.4.0"
-rstest = "0.19.0"
+rstest = "0.21.0"
 approx = "0.5.1"
 collection = { path = ".", features = ["testing"] }
 common = { path = "../common/common", features = ["testing"] }
@@ -55,8 +56,8 @@ uuid = { workspace = true }
 url = { version = "2", features = ["serde"] }
 validator = { workspace = true }
 actix-web-validator = "5.0.1"
-actix-web = {version = "4.6.0"}
-actix-files = "0.6.5"
+actix-web = {version = "4.7.0"}
+actix-files = "0.6.6"
 
 common = { path = "../common/common" }
 cancel = { path = "../common/cancel" }

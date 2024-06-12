@@ -53,7 +53,7 @@ use crate::operations::types::{
     CollectionResult, CollectionStatus, OptimizersStatus,
 };
 use crate::operations::OperationWithClockTag;
-use crate::optimizers_builder::{build_optimizers, clear_temp_segments};
+use crate::optimizers_builder::{build_optimizers, clear_temp_segments, OptimizersConfig};
 use crate::shards::shard::ShardId;
 use crate::shards::shard_config::{ShardConfig, SHARD_CONFIG_FILE};
 use crate::shards::telemetry::{LocalShardTelemetry, OptimizerTelemetry};
@@ -199,11 +199,13 @@ impl LocalShard {
     }
 
     /// Recovers shard from disk.
+    #[allow(clippy::too_many_arguments)]
     pub async fn load(
         id: ShardId,
         collection_id: CollectionId,
         shard_path: &Path,
         collection_config: Arc<TokioRwLock<CollectionConfig>>,
+        effective_optimizers_config: OptimizersConfig,
         shared_storage_config: Arc<SharedStorageConfig>,
         update_runtime: Handle,
         optimizer_cpu_budget: CpuBudget,
@@ -289,7 +291,7 @@ impl LocalShard {
                 })
                 .unwrap_or(Ok(()))?;
 
-            segment_holder.add(segment);
+            segment_holder.add_new(segment);
         }
 
         let res = segment_holder.deduplicate_points()?;
@@ -301,7 +303,7 @@ impl LocalShard {
         let optimizers = build_optimizers(
             shard_path,
             &collection_config_read.params,
-            &collection_config_read.optimizer_config,
+            &effective_optimizers_config,
             &collection_config_read.hnsw_config,
             &collection_config_read.quantization_config,
         );
@@ -335,6 +337,7 @@ impl LocalShard {
         )
         .await;
 
+        // Apply outstanding operations from WAL
         local_shard.load_from_wal(collection_id).await?;
 
         let available_memory_bytes = Mem::new().available_memory_bytes() as usize;
@@ -373,6 +376,7 @@ impl LocalShard {
         shard_path.join("segments")
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn build_local(
         id: ShardId,
         collection_id: CollectionId,
@@ -381,6 +385,7 @@ impl LocalShard {
         shared_storage_config: Arc<SharedStorageConfig>,
         update_runtime: Handle,
         optimizer_cpu_budget: CpuBudget,
+        effective_optimizers_config: OptimizersConfig,
     ) -> CollectionResult<LocalShard> {
         // initialize local shard config file
         let local_shard_config = ShardConfig::new_replica_set();
@@ -392,6 +397,7 @@ impl LocalShard {
             shared_storage_config,
             update_runtime,
             optimizer_cpu_budget,
+            effective_optimizers_config,
         )
         .await?;
         local_shard_config.save(shard_path)?;
@@ -399,6 +405,7 @@ impl LocalShard {
     }
 
     /// Creates new empty shard with given configuration, initializing all storages, optimizers and directories.
+    #[allow(clippy::too_many_arguments)]
     pub async fn build(
         id: ShardId,
         collection_id: CollectionId,
@@ -407,6 +414,7 @@ impl LocalShard {
         shared_storage_config: Arc<SharedStorageConfig>,
         update_runtime: Handle,
         optimizer_cpu_budget: CpuBudget,
+        effective_optimizers_config: OptimizersConfig,
     ) -> CollectionResult<LocalShard> {
         let config = collection_config.read().await;
 
@@ -466,7 +474,7 @@ impl LocalShard {
                 ))
             })??;
 
-            segment_holder.add(segment);
+            segment_holder.add_new(segment);
         }
 
         let wal: SerdeWal<OperationWithClockTag> =
@@ -475,7 +483,7 @@ impl LocalShard {
         let optimizers = build_optimizers(
             shard_path,
             &config.params,
-            &config.optimizer_config,
+            &effective_optimizers_config,
             &config.hnsw_config,
             &config.quantization_config,
         );
@@ -617,6 +625,39 @@ impl LocalShard {
             );
         }
 
+        // The storage is expected to be consistent after WAL recovery
+        #[cfg(feature = "data-consistency-check")]
+        self.check_data_consistency()?;
+
+        Ok(())
+    }
+
+    /// Check data consistency for all segments
+    ///
+    /// Returns an error at the first inconsistent segment
+    pub fn check_data_consistency(&self) -> CollectionResult<()> {
+        log::info!("Checking data consistency for shard {:?}", self.path);
+        let segments = self.segments.read();
+        for (_idx, segment) in segments.iter() {
+            match segment {
+                LockedSegment::Original(raw_segment) => {
+                    let segment_guard = raw_segment.read();
+                    if let Err(err) = segment_guard.check_data_consistency() {
+                        log::error!(
+                            "Segment {:?} is inconsistent: {}",
+                            segment_guard.current_path,
+                            err
+                        );
+                        return Err(err.into());
+                    }
+                }
+                LockedSegment::Proxy(_) => {
+                    return Err(CollectionError::service_error(
+                        "Proxy segment found in check_data_consistency",
+                    ));
+                }
+            }
+        }
         Ok(())
     }
 
