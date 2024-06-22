@@ -171,7 +171,7 @@ pub fn build_segment_3(path: &Path) -> Segment {
     .unwrap();
 
     let collect_points_data = |vectors: &[DenseVector]| {
-        NamedVectors::from([
+        NamedVectors::from_pairs([
             ("vector1".to_owned(), vectors[0].clone()),
             ("vector2".to_owned(), vectors[1].clone()),
             ("vector3".to_owned(), vectors[2].clone()),
@@ -254,7 +254,7 @@ pub fn build_segment_sparse_1(path: &Path) -> Segment {
             sparse_vector_data: HashMap::from([(
                 "sparse".to_owned(),
                 SparseVectorDataConfig {
-                    index: SparseIndexConfig::new(None, SparseIndexType::MutableRam),
+                    index: SparseIndexConfig::new(None, SparseIndexType::MutableRam, None),
                 },
             )]),
             payload_storage_type: Default::default(),
@@ -339,7 +339,7 @@ pub fn build_segment_sparse_2(path: &Path) -> Segment {
             sparse_vector_data: HashMap::from([(
                 "sparse".to_owned(),
                 SparseVectorDataConfig {
-                    index: SparseIndexConfig::new(None, SparseIndexType::MutableRam),
+                    index: SparseIndexConfig::new(None, SparseIndexType::MutableRam, None),
                 },
             )]),
             payload_storage_type: Default::default(),

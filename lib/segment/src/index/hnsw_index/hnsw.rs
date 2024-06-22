@@ -679,13 +679,17 @@ impl<TGraphLinks: GraphLinks> VectorIndex for HNSWIndex<TGraphLinks> {
         stopped: &AtomicBool,
         _tick_progress: impl FnMut(),
     ) -> OperationResult<()> {
+        let vector_storage = self.vector_storage.borrow();
+        let total_vector_count = vector_storage.total_vector_count();
+        if total_vector_count == 0 {
+            return Ok(());
+        }
+
         // Build main index graph
         let id_tracker = self.id_tracker.borrow();
-        let vector_storage = self.vector_storage.borrow();
+
         let quantized_vectors = self.quantized_vectors.borrow();
         let mut rng = thread_rng();
-
-        let total_vector_count = vector_storage.total_vector_count();
         let deleted_bitslice = vector_storage.deleted_vector_bitslice();
 
         debug!(
@@ -902,7 +906,11 @@ impl<TGraphLinks: GraphLinks> VectorIndex for HNSWIndex<TGraphLinks> {
             .unwrap_or(0)
     }
 
-    fn update_vector(&mut self, _id: PointOffsetType, _vector: VectorRef) -> OperationResult<()> {
+    fn update_vector(
+        &mut self,
+        _id: PointOffsetType,
+        _vector: Option<VectorRef>,
+    ) -> OperationResult<()> {
         Err(OperationError::service_error("Cannot update HNSW index"))
     }
 }

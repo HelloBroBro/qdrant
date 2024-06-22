@@ -178,7 +178,10 @@
     - [PrefetchQuery](#qdrant-PrefetchQuery)
     - [QuantizationSearchParams](#qdrant-QuantizationSearchParams)
     - [Query](#qdrant-Query)
+    - [QueryBatchPoints](#qdrant-QueryBatchPoints)
+    - [QueryBatchResponse](#qdrant-QueryBatchResponse)
     - [QueryPoints](#qdrant-QueryPoints)
+    - [QueryResponse](#qdrant-QueryResponse)
     - [Range](#qdrant-Range)
     - [ReadConsistency](#qdrant-ReadConsistency)
     - [RecommendBatchPoints](#qdrant-RecommendBatchPoints)
@@ -285,6 +288,7 @@
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
 | shard_id | [uint32](#uint32) |  | Local shard id |
+| to_shard_id | [uint32](#uint32) | optional |  |
 | from_peer_id | [uint64](#uint64) |  |  |
 | to_peer_id | [uint64](#uint64) |  |  |
 
@@ -908,6 +912,7 @@
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
 | shard_id | [uint32](#uint32) |  | Local shard id |
+| to_shard_id | [uint32](#uint32) | optional |  |
 | from_peer_id | [uint64](#uint64) |  |  |
 | to_peer_id | [uint64](#uint64) |  |  |
 | method | [ShardTransferMethod](#qdrant-ShardTransferMethod) | optional |  |
@@ -1131,6 +1136,7 @@ Note: 1kB = 1 vector of size 256. |
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
 | shard_id | [uint32](#uint32) |  | Local shard id |
+| to_shard_id | [uint32](#uint32) | optional |  |
 | from_peer_id | [uint64](#uint64) |  |  |
 | to_peer_id | [uint64](#uint64) |  |  |
 | method | [ShardTransferMethod](#qdrant-ShardTransferMethod) | optional |  |
@@ -1149,6 +1155,7 @@ Note: 1kB = 1 vector of size 256. |
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
 | shard_id | [uint32](#uint32) |  | Local shard id |
+| to_shard_id | [uint32](#uint32) | optional |  |
 | from_peer_id | [uint64](#uint64) |  |  |
 | to_peer_id | [uint64](#uint64) |  |  |
 | method | [ShardTransferMethod](#qdrant-ShardTransferMethod) |  |  |
@@ -1200,6 +1207,7 @@ Note: 1kB = 1 vector of size 256. |
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
 | shard_id | [uint32](#uint32) |  | Local shard id |
+| to_shard_id | [uint32](#uint32) | optional |  |
 | from | [uint64](#uint64) |  |  |
 | to | [uint64](#uint64) |  |  |
 | sync | [bool](#bool) |  | If `true` transfer is a synchronization of a replicas; If `false` transfer is a moving of a shard from one peer to another |
@@ -1219,6 +1227,7 @@ Note: 1kB = 1 vector of size 256. |
 | ----- | ---- | ----- | ----------- |
 | full_scan_threshold | [uint64](#uint64) | optional | Prefer a full scan search upto (excluding) this number of vectors. Note: this is number of vectors, not KiloBytes. |
 | on_disk | [bool](#bool) | optional | Store inverted index on disk. If set to false, the index will be stored in RAM. |
+| datatype | [Datatype](#qdrant-Datatype) | optional | Datatype used to store weights in the index. |
 
 
 
@@ -1640,6 +1649,7 @@ Note: 1kB = 1 vector of size 256. |
 | StreamRecords | 0 | Stream shard records in batches |
 | Snapshot | 1 | Snapshot the shard and recover it on the target peer |
 | WalDelta | 2 | Resolve WAL delta between peers and transfer the difference |
+| ReshardingStreamRecords | 3 | Stream shard records in batches for resharding |
 
 
 
@@ -3025,6 +3035,7 @@ Additionally, the first and last points of each GeoLineString must be the same.
 | search_params | [SearchParams](#qdrant-SearchParams) | optional | Search params for when there is no prefetch. |
 | score_threshold | [float](#float) | optional | Return points with scores better than this threshold. |
 | limit | [uint64](#uint64) | optional | Max number of points. Default is 10 |
+| lookup_from | [LookupLocation](#qdrant-LookupLocation) | optional | The location to use for IDs lookup, if not specified - use the current collection and the &#39;using&#39; vector |
 
 
 
@@ -3072,6 +3083,40 @@ For example, if `oversampling` is 2.4 and `limit` is 100, then 240 vectors will 
 
 
 
+<a name="qdrant-QueryBatchPoints"></a>
+
+### QueryBatchPoints
+
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| collection_name | [string](#string) |  |  |
+| query_points | [QueryPoints](#qdrant-QueryPoints) | repeated |  |
+| read_consistency | [ReadConsistency](#qdrant-ReadConsistency) | optional | Options for specifying read consistency guarantees |
+| timeout | [uint64](#uint64) | optional | If set, overrides global timeout setting for this request. Unit is seconds. |
+
+
+
+
+
+
+<a name="qdrant-QueryBatchResponse"></a>
+
+### QueryBatchResponse
+
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| result | [BatchResult](#qdrant-BatchResult) | repeated |  |
+| time | [double](#double) |  | Time spent to process |
+
+
+
+
+
+
 <a name="qdrant-QueryPoints"></a>
 
 ### QueryPoints
@@ -3093,6 +3138,24 @@ For example, if `oversampling` is 2.4 and `limit` is 100, then 240 vectors will 
 | with_payload | [WithPayloadSelector](#qdrant-WithPayloadSelector) | optional | Options for specifying which payload to include or not. |
 | read_consistency | [ReadConsistency](#qdrant-ReadConsistency) | optional | Options for specifying read consistency guarantees. |
 | shard_key_selector | [ShardKeySelector](#qdrant-ShardKeySelector) | optional | Specify in which shards to look for the points, if not specified - look in all shards. |
+| lookup_from | [LookupLocation](#qdrant-LookupLocation) | optional | The location to use for IDs lookup, if not specified - use the current collection and the &#39;using&#39; vector |
+| timeout | [uint64](#uint64) | optional | If set, overrides global timeout setting for this request. Unit is seconds. |
+
+
+
+
+
+
+<a name="qdrant-QueryResponse"></a>
+
+### QueryResponse
+
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| result | [ScoredPoint](#qdrant-ScoredPoint) | repeated |  |
+| time | [double](#double) |  | Time spent to process |
 
 
 
@@ -4085,6 +4148,8 @@ When using target (with or without context), the score behaves a little differen
 | DiscoverBatch | [DiscoverBatchPoints](#qdrant-DiscoverBatchPoints) | [DiscoverBatchResponse](#qdrant-DiscoverBatchResponse) | Batch request points based on { positive, negative } pairs of examples, and/or a target |
 | Count | [CountPoints](#qdrant-CountPoints) | [CountResponse](#qdrant-CountResponse) | Count points in collection with given filtering conditions |
 | UpdateBatch | [UpdateBatchPoints](#qdrant-UpdateBatchPoints) | [UpdateBatchResponse](#qdrant-UpdateBatchResponse) | Perform multiple update operations in one request |
+| Query | [QueryPoints](#qdrant-QueryPoints) | [QueryResponse](#qdrant-QueryResponse) | Universally query points. This endpoint covers all capabilities of search, recommend, discover, filters. But also enables hybrid and multi-stage queries. |
+| QueryBatch | [QueryBatchPoints](#qdrant-QueryBatchPoints) | [QueryBatchResponse](#qdrant-QueryBatchResponse) | Universally query points in a batch fashion. This endpoint covers all capabilities of search, recommend, discover, filters. But also enables hybrid and multi-stage queries. |
 
  
 

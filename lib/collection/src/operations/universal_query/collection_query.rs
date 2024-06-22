@@ -1,14 +1,15 @@
 use std::collections::HashSet;
 
-use api::rest::RecommendStrategy;
+use api::rest::{LookupLocation, RecommendStrategy};
 use common::types::ScoreType;
 use itertools::Itertools;
 use segment::data_types::order_by::OrderBy;
 use segment::data_types::vectors::{
-    MultiDenseVector, NamedQuery, NamedVectorStruct, Vector, VectorRef, DEFAULT_VECTOR_NAME,
+    MultiDenseVectorInternal, NamedQuery, NamedVectorStruct, Vector, VectorRef, DEFAULT_VECTOR_NAME,
 };
 use segment::types::{
-    Condition, Filter, HasIdCondition, PointIdType, SearchParams, WithPayloadInterface, WithVector,
+    Condition, ExtendedPointId, Filter, HasIdCondition, PointIdType, SearchParams,
+    WithPayloadInterface, WithVector,
 };
 use segment::vector_storage::query::{ContextPair, ContextQuery, DiscoveryQuery, RecoQuery};
 
@@ -32,16 +33,17 @@ pub struct CollectionQueryRequest {
     pub params: Option<SearchParams>,
     pub with_vector: WithVector,
     pub with_payload: WithPayloadInterface,
+    pub lookup_from: Option<LookupLocation>,
 }
 
 impl CollectionQueryRequest {
-    const DEFAULT_LIMIT: usize = 10;
+    pub const DEFAULT_LIMIT: usize = 10;
 
-    const DEFAULT_OFFSET: usize = 0;
+    pub const DEFAULT_OFFSET: usize = 0;
 
-    const DEFAULT_WITH_VECTOR: WithVector = WithVector::Bool(false);
+    pub const DEFAULT_WITH_VECTOR: WithVector = WithVector::Bool(false);
 
-    const DEFAULT_WITH_PAYLOAD: WithPayloadInterface = WithPayloadInterface::Bool(false);
+    pub const DEFAULT_WITH_PAYLOAD: WithPayloadInterface = WithPayloadInterface::Bool(false);
 }
 
 pub enum Query {
@@ -134,56 +136,21 @@ impl VectorQuery<VectorInput> {
                 VectorQuery::Nearest(vector)
             }
             VectorQuery::RecommendAverageVector(reco) => {
-                let positives = reco
-                    .positives
-                    .into_iter()
-                    .filter_map(|vector_input| {
-                        ids_to_vectors.resolve_reference(
-                            lookup_collection,
-                            lookup_vector_name,
-                            vector_input,
-                        )
-                    })
-                    .collect();
-                let negatives = reco
-                    .negatives
-                    .into_iter()
-                    .filter_map(|vector_input| {
-                        ids_to_vectors.resolve_reference(
-                            lookup_collection,
-                            lookup_vector_name,
-                            vector_input,
-                        )
-                    })
-                    .collect();
-
+                let (positives, negatives) = Self::resolve_reco_reference(
+                    reco,
+                    ids_to_vectors,
+                    lookup_vector_name,
+                    lookup_collection,
+                );
                 VectorQuery::RecommendAverageVector(RecoQuery::new(positives, negatives))
             }
             VectorQuery::RecommendBestScore(reco) => {
-                // TODO(universal-query): This is a copy-paste from `RecommendAverageVector` branch, remove duplicated code
-                let positives = reco
-                    .positives
-                    .into_iter()
-                    .filter_map(|vector_input| {
-                        ids_to_vectors.resolve_reference(
-                            lookup_collection,
-                            lookup_vector_name,
-                            vector_input,
-                        )
-                    })
-                    .collect();
-                let negatives = reco
-                    .negatives
-                    .into_iter()
-                    .filter_map(|vector_input| {
-                        ids_to_vectors.resolve_reference(
-                            lookup_collection,
-                            lookup_vector_name,
-                            vector_input,
-                        )
-                    })
-                    .collect();
-
+                let (positives, negatives) = Self::resolve_reco_reference(
+                    reco,
+                    ids_to_vectors,
+                    lookup_vector_name,
+                    lookup_collection,
+                );
                 VectorQuery::RecommendBestScore(RecoQuery::new(positives, negatives))
             }
             VectorQuery::Discover(discover) => {
@@ -222,6 +189,38 @@ impl VectorQuery<VectorInput> {
                 VectorQuery::Context(ContextQuery { pairs })
             }
         }
+    }
+
+    /// Resolves the references in the RecoQuery into actual vectors.
+    fn resolve_reco_reference(
+        reco_query: RecoQuery<VectorInput>,
+        ids_to_vectors: &ReferencedVectors,
+        lookup_vector_name: &str,
+        lookup_collection: Option<&String>,
+    ) -> (Vec<Vector>, Vec<Vector>) {
+        let positives = reco_query
+            .positives
+            .into_iter()
+            .filter_map(|vector_input| {
+                ids_to_vectors.resolve_reference(
+                    lookup_collection,
+                    lookup_vector_name,
+                    vector_input,
+                )
+            })
+            .collect();
+        let negatives = reco_query
+            .negatives
+            .into_iter()
+            .filter_map(|vector_input| {
+                ids_to_vectors.resolve_reference(
+                    lookup_collection,
+                    lookup_vector_name,
+                    vector_input,
+                )
+            })
+            .collect();
+        (positives, negatives)
     }
 }
 
@@ -266,27 +265,19 @@ pub struct CollectionPrefetch {
     pub limit: usize,
     /// Search params for when there is no prefetch
     pub params: Option<SearchParams>,
+    pub lookup_from: Option<LookupLocation>,
 }
 
 /// Exclude the referenced ids by editing the filter.
-fn exclude_referenced_ids(query: &Option<Query>, filter: Option<Filter>) -> Option<Filter> {
-    match query {
-        Some(Query::Vector(vector_query)) => {
-            let ids: HashSet<_> = vector_query
-                .get_referenced_ids()
-                .into_iter()
-                .copied()
-                .collect();
+fn exclude_referenced_ids(ids: Vec<ExtendedPointId>, filter: Option<Filter>) -> Option<Filter> {
+    let ids: HashSet<_> = ids.into_iter().collect();
 
-            if ids.is_empty() {
-                return filter;
-            }
-
-            let id_filter = Filter::new_must_not(Condition::HasId(HasIdCondition::from(ids)));
-            Some(id_filter.merge_owned(filter.unwrap_or_default()))
-        }
-        _ => filter,
+    if ids.is_empty() {
+        return filter;
     }
+
+    let id_filter = Filter::new_must_not(Condition::HasId(HasIdCondition::from(ids)));
+    Some(id_filter.merge_owned(filter.unwrap_or_default()))
 }
 
 impl CollectionPrefetch {
@@ -302,8 +293,6 @@ impl CollectionPrefetch {
                 "A query is needed to merge the prefetches. Can't have prefetches without defining a query.",
             ));
         }
-
-        let filter = exclude_referenced_ids(&self.query, self.filter);
 
         let query = self
             .query
@@ -332,7 +321,7 @@ impl CollectionPrefetch {
         Ok(ShardPrefetch {
             prefetches,
             query,
-            filter,
+            filter: self.filter,
             score_threshold: self.score_threshold,
             limit: self.limit,
             params: self.params,
@@ -354,7 +343,7 @@ impl CollectionQueryRequest {
         }
 
         // Check we actually fetched all referenced vectors in this request (and nested prefetches)
-        for &point_id in &(&self).get_referenced_point_ids() {
+        for &point_id in &self.get_referenced_point_ids() {
             if ids_to_vectors.get(&None, point_id).is_none() {
                 return Err(CollectionError::PointNotFound {
                     missed_point_id: point_id,
@@ -362,11 +351,12 @@ impl CollectionQueryRequest {
             }
         }
 
-        let lookup_vector_name = (&self).get_lookup_vector_name();
-        let lookup_collection = (&self).get_lookup_collection().cloned();
+        let lookup_vector_name = self.get_lookup_vector_name();
+        let lookup_collection = self.get_lookup_collection().cloned();
         let using = self.using.clone();
 
-        let filter = exclude_referenced_ids(&self.query, self.filter);
+        // Edit filter to exclude all referenced point ids (root and nested)
+        let filter = exclude_referenced_ids(self.get_referenced_point_ids(), self.filter);
 
         let query = self
             .query
@@ -424,6 +414,7 @@ mod from_rest {
                 offset,
                 with_vector,
                 with_payload,
+                lookup_from,
             } = value;
 
             Self {
@@ -437,6 +428,7 @@ mod from_rest {
                 params,
                 with_vector: with_vector.unwrap_or(Self::DEFAULT_WITH_VECTOR),
                 with_payload: with_payload.unwrap_or(Self::DEFAULT_WITH_PAYLOAD),
+                lookup_from: lookup_from.map(LookupLocation::from),
             }
         }
     }
@@ -451,6 +443,7 @@ mod from_rest {
                 score_threshold,
                 params,
                 limit,
+                lookup_from,
             } = value;
 
             Self {
@@ -461,6 +454,7 @@ mod from_rest {
                 score_threshold,
                 limit: limit.unwrap_or(CollectionQueryRequest::DEFAULT_LIMIT),
                 params,
+                lookup_from,
             }
         }
     }
@@ -475,13 +469,13 @@ mod from_rest {
         fn from(value: rest::Query) -> Self {
             match value {
                 rest::Query::Nearest(nearest) => {
-                    Query::Vector(VectorQuery::Nearest(From::from(nearest)))
+                    Query::Vector(VectorQuery::Nearest(From::from(nearest.nearest)))
                 }
-                rest::Query::Recommend(recommend) => Query::Vector(From::from(recommend)),
-                rest::Query::Discover(discover) => Query::Vector(From::from(discover)),
-                rest::Query::Context(context) => Query::Vector(From::from(context)),
-                rest::Query::OrderBy(order_by) => Query::OrderBy(OrderBy::from(order_by)),
-                rest::Query::Fusion(fusion) => Query::Fusion(Fusion::from(fusion)),
+                rest::Query::Recommend(recommend) => Query::Vector(From::from(recommend.recommend)),
+                rest::Query::Discover(discover) => Query::Vector(From::from(discover.discover)),
+                rest::Query::Context(context) => Query::Vector(From::from(context.context)),
+                rest::Query::OrderBy(order_by) => Query::OrderBy(OrderBy::from(order_by.order_by)),
+                rest::Query::Fusion(fusion) => Query::Fusion(Fusion::from(fusion.fusion)),
             }
         }
     }
@@ -545,7 +539,7 @@ mod from_rest {
                 }
                 rest::VectorInput::MultiDenseVector(multi_dense) => VectorInput::Vector(
                     // TODO(universal-query): Validate at API level
-                    Vector::MultiDense(MultiDenseVector::new_unchecked(multi_dense)),
+                    Vector::MultiDense(MultiDenseVectorInternal::new_unchecked(multi_dense)),
                 ),
             }
         }
@@ -570,28 +564,18 @@ mod from_rest {
     }
 }
 
-mod from_grpc {
+pub mod from_grpc {
     use api::grpc::qdrant::{self as grpc};
-    use api::rest::ShardKeySelector;
     use tonic::Status;
 
     use super::*;
-    use crate::operations::consistency_params::ReadConsistency;
-    use crate::operations::shard_selector_internal::ShardSelectorInternal;
 
-    pub struct IntoCollectionQueryRequest {
-        pub request: CollectionQueryRequest,
-        pub collection_name: String,
-        pub shard_key: ShardSelectorInternal,
-        pub read_consistency: Option<ReadConsistency>,
-    }
-
-    impl TryFrom<grpc::QueryPoints> for IntoCollectionQueryRequest {
+    impl TryFrom<api::grpc::qdrant::QueryPoints> for CollectionQueryRequest {
         type Error = Status;
 
-        fn try_from(value: grpc::QueryPoints) -> Result<Self, Self::Error> {
+        fn try_from(value: api::grpc::qdrant::QueryPoints) -> Result<Self, Self::Error> {
             let grpc::QueryPoints {
-                collection_name,
+                collection_name: _,
                 prefetch,
                 query,
                 using,
@@ -602,8 +586,10 @@ mod from_grpc {
                 offset,
                 with_payload,
                 with_vectors,
-                read_consistency,
-                shard_key_selector,
+                read_consistency: _,
+                shard_key_selector: _,
+                lookup_from,
+                timeout: _,
             } = value;
 
             let request = CollectionQueryRequest {
@@ -629,19 +615,9 @@ mod from_grpc {
                     .map(TryFrom::try_from)
                     .transpose()?
                     .unwrap_or(CollectionQueryRequest::DEFAULT_WITH_PAYLOAD),
+                lookup_from: lookup_from.map(From::from),
             };
-
-            let shard_key =
-                ShardSelectorInternal::from(shard_key_selector.map(ShardKeySelector::from));
-
-            let read_consistency = read_consistency.map(TryFrom::try_from).transpose()?;
-
-            Ok(IntoCollectionQueryRequest {
-                request,
-                collection_name,
-                shard_key,
-                read_consistency,
-            })
+            Ok(request)
         }
     }
 
@@ -657,6 +633,7 @@ mod from_grpc {
                 search_params,
                 score_threshold,
                 limit,
+                lookup_from,
             } = value;
 
             let collection_query = Self {
@@ -672,6 +649,7 @@ mod from_grpc {
                     .map(|l| l as usize)
                     .unwrap_or(CollectionQueryRequest::DEFAULT_LIMIT),
                 params: search_params.map(From::from),
+                lookup_from: lookup_from.map(From::from),
             };
 
             Ok(collection_query)

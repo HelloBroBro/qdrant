@@ -15,7 +15,7 @@ use crate::operations::types::{
     CountRequestInternal, CountResult, PointRequestInternal, Record, UpdateResult, UpdateStatus,
 };
 use crate::operations::universal_query::planned_query::PlannedQuery;
-use crate::operations::universal_query::shard_query::ShardQueryRequest;
+use crate::operations::universal_query::shard_query::{ShardQueryRequest, ShardQueryResponse};
 use crate::operations::OperationWithClockTag;
 use crate::shards::local_shard::LocalShard;
 use crate::shards::shard_trait::ShardOperation;
@@ -185,16 +185,15 @@ impl ShardOperation for LocalShard {
         SegmentsSearcher::retrieve(self.segments(), &request.ids, with_payload, with_vector)
     }
 
-    async fn query(
+    async fn query_batch(
         &self,
-        request: Arc<ShardQueryRequest>,
+        requests: Arc<Vec<ShardQueryRequest>>,
         search_runtime_handle: &Handle,
-    ) -> CollectionResult<Vec<Vec<ScoredPoint>>> {
-        self.do_planned_query(
-            PlannedQuery::try_from(request.as_ref().to_owned())?,
-            search_runtime_handle,
-            None,
-        )
-        .await
+        timeout: Option<Duration>,
+    ) -> CollectionResult<Vec<ShardQueryResponse>> {
+        let planned_query = PlannedQuery::try_from(requests.as_ref().to_owned())?;
+
+        self.do_planned_query(planned_query, search_runtime_handle, timeout)
+            .await
     }
 }
