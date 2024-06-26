@@ -1,8 +1,6 @@
 use std::collections::HashMap;
 use std::sync::atomic::AtomicBool;
-use std::sync::Arc;
 
-use common::cpu::CpuPermit;
 use common::types::TelemetryDetail;
 use itertools::Itertools;
 use rand::prelude::StdRng;
@@ -11,16 +9,13 @@ use segment::data_types::named_vectors::NamedVectors;
 use segment::data_types::vectors::{QueryVector, VectorElementType};
 use segment::entry::entry_point::SegmentEntry;
 use segment::fixtures::payload_fixtures::random_vector;
-use segment::index::hnsw_index::num_rayon_threads;
-use segment::index::sparse_index::sparse_index_config::{
-    SparseIndexConfig, SparseIndexType, SparseVectorIndexDatatype,
-};
+use segment::index::sparse_index::sparse_index_config::{SparseIndexConfig, SparseIndexType};
 use segment::index::sparse_index::sparse_vector_index::SparseVectorIndexOpenArgs;
 use segment::index::VectorIndex;
 use segment::segment_constructor::{build_segment, create_sparse_vector_index_test};
 use segment::types::{
     Distance, Indexes, SegmentConfig, SeqNumberType, SparseVectorDataConfig, VectorDataConfig,
-    VectorStorageType, DEFAULT_SPARSE_FULL_SCAN_THRESHOLD,
+    VectorStorageDatatype, VectorStorageType, DEFAULT_SPARSE_FULL_SCAN_THRESHOLD,
 };
 use segment::vector_storage::query::{ContextPair, DiscoveryQuery};
 use sparse::common::sparse_vector::SparseVector;
@@ -124,7 +119,7 @@ fn sparse_index_discover_test() {
                 index: SparseIndexConfig {
                     full_scan_threshold: Some(DEFAULT_SPARSE_FULL_SCAN_THRESHOLD),
                     index_type: SparseIndexType::MutableRam,
-                    datatype: Some(SparseVectorIndexDatatype::Float32),
+                    datatype: Some(VectorStorageDatatype::Float32),
                 },
             },
         )]),
@@ -139,7 +134,7 @@ fn sparse_index_discover_test() {
                 storage_type: VectorStorageType::Memory,
                 index: Indexes::Plain {},
                 quantization_config: None,
-                multivec_config: None,
+                multivector_config: None,
                 datatype: None,
             },
         )]),
@@ -149,9 +144,6 @@ fn sparse_index_discover_test() {
 
     let mut sparse_segment = build_segment(dir.path(), &sparse_config, true).unwrap();
     let mut dense_segment = build_segment(dir.path(), &dense_config, true).unwrap();
-
-    let permit_cpu_count = num_rayon_threads(0);
-    let permit = Arc::new(CpuPermit::dummy(permit_cpu_count as u32));
 
     for n in 0..num_vectors {
         let (sparse_vector, dense_vector) = random_named_vector(&mut rnd, dim);
@@ -168,21 +160,20 @@ fn sparse_index_discover_test() {
     let payload_index_ptr = sparse_segment.payload_index.clone();
 
     let vector_storage = &sparse_segment.vector_data[SPARSE_VECTOR_NAME].vector_storage;
-    let mut sparse_index = create_sparse_vector_index_test(SparseVectorIndexOpenArgs {
+    let sparse_index = create_sparse_vector_index_test(SparseVectorIndexOpenArgs {
         config: SparseIndexConfig {
             full_scan_threshold: Some(DEFAULT_SPARSE_FULL_SCAN_THRESHOLD),
             index_type: SparseIndexType::ImmutableRam,
-            datatype: Some(SparseVectorIndexDatatype::Float32),
+            datatype: Some(VectorStorageDatatype::Float32),
         },
         id_tracker: sparse_segment.id_tracker.clone(),
         vector_storage: vector_storage.clone(),
         payload_index: payload_index_ptr.clone(),
         path: index_dir.path(),
         stopped: &stopped,
+        tick_progress: || (),
     })
     .unwrap();
-
-    sparse_index.build_index(permit, &stopped).unwrap();
 
     let top = 3;
     let attempts = 100;

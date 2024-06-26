@@ -136,11 +136,14 @@ pub fn try_record_from_grpc(
         .map(|vectors| vectors.try_into())
         .transpose()?;
 
+    let order_value = point.order_value.map(TryFrom::try_from).transpose()?;
+
     Ok(Record {
         id,
         payload,
         vector,
         shard_key: convert_shard_key_from_grpc_opt(point.shard_key),
+        order_value,
     })
 }
 
@@ -444,6 +447,7 @@ impl From<Record> for api::grpc::qdrant::RetrievedPoint {
             payload: record.payload.map(payload_to_proto).unwrap_or_default(),
             vectors: vectors.map(api::grpc::qdrant::Vectors::from),
             shard_key: record.shard_key.map(convert_shard_key_to_grpc),
+            order_value: record.order_value.map(From::from),
         }
     }
 }
@@ -547,7 +551,7 @@ impl TryFrom<api::grpc::qdrant::VectorParams> for VectorParams {
                 .transpose()?,
             on_disk: vector_params.on_disk,
             datatype: convert_datatype_from_proto(vector_params.datatype)?,
-            multivec_config: vector_params
+            multivector_config: vector_params
                 .multivector_config
                 .map(MultiVectorConfig::try_from)
                 .transpose()?,
@@ -1554,7 +1558,7 @@ impl From<VectorParams> for api::grpc::qdrant::VectorParams {
                 .datatype
                 .map(|dt| api::grpc::qdrant::Datatype::from(dt).into()),
             multivector_config: value
-                .multivec_config
+                .multivector_config
                 .map(api::grpc::qdrant::MultiVectorConfig::from),
         }
     }

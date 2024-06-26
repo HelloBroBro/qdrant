@@ -27,7 +27,6 @@ use crate::index::inverted_index::inverted_index_ram::InvertedIndexRam;
 use crate::index::inverted_index::InvertedIndex;
 use crate::index::posting_list_common::GenericPostingElement;
 
-const POSTING_HEADER_SIZE: usize = size_of::<PostingListFileHeader>();
 const INDEX_CONFIG_FILE_NAME: &str = "inverted_index_config.json";
 
 pub struct Version;
@@ -45,6 +44,7 @@ pub struct InvertedIndexFileHeader {
 }
 
 /// Inverted flatten index from dimension id to posting list
+#[derive(Debug)]
 pub struct InvertedIndexCompressedMmap<W> {
     path: PathBuf,
     mmap: Arc<Mmap>,
@@ -54,7 +54,7 @@ pub struct InvertedIndexCompressedMmap<W> {
 
 #[derive(Debug, Default, Clone)]
 #[repr(C)]
-struct PostingListFileHeader {
+struct PostingListFileHeader<W: Weight> {
     pub ids_start: u64,
     pub last_id: u32,
     /// Possible values: 0, 4, 8, ..., 512.
@@ -62,6 +62,7 @@ struct PostingListFileHeader {
     /// Max = 512 = `BLOCK_LEN * size_of::<u32>()` = `128 * 4`.
     pub ids_len: u32,
     pub chunks_count: u32,
+    pub quantization_params: W::QuantizationParams,
 }
 
 impl<W: Weight> InvertedIndex for InvertedIndexCompressedMmap<W> {
@@ -75,6 +76,14 @@ impl<W: Weight> InvertedIndex for InvertedIndexCompressedMmap<W> {
 
     fn save(&self, path: &Path) -> std::io::Result<()> {
         debug_assert_eq!(path, self.path);
+
+        // If Self instance exists, it's either constructed by using `open()` (which reads index
+        // files), or using `from_ram_index()` (which writes them). Both assume that the files
+        // exist. If any of the files are missing, then something went wrong.
+        for file in Self::files(path) {
+            debug_assert!(file.exists());
+        }
+
         Ok(())
     }
 
@@ -145,17 +154,19 @@ impl<W: Weight> InvertedIndexCompressedMmap<W> {
             return None;
         }
 
-        let header: PostingListFileHeader = self
-            .slice_part::<PostingListFileHeader>(*id as u64 * POSTING_HEADER_SIZE as u64, 1u32)[0]
-            .clone();
+        let header: PostingListFileHeader<W> = self.slice_part::<PostingListFileHeader<W>>(
+            *id as u64 * size_of::<PostingListFileHeader<W>>() as u64,
+            1u32,
+        )[0]
+        .clone();
 
         let remainders_start = header.ids_start
             + header.ids_len as u64
             + header.chunks_count as u64 * size_of::<CompressedPostingChunk<W>>() as u64;
 
         let remainders_end = if *id + 1 < self.file_header.posting_count as DimId {
-            self.slice_part::<PostingListFileHeader>(
-                (*id + 1) as u64 * POSTING_HEADER_SIZE as u64,
+            self.slice_part::<PostingListFileHeader<W>>(
+                (*id + 1) as u64 * size_of::<PostingListFileHeader<W>>() as u64,
                 1u32,
             )[0]
             .ids_start
@@ -182,6 +193,7 @@ impl<W: Weight> InvertedIndexCompressedMmap<W> {
                 &self.mmap[remainders_start as usize..remainders_end as usize],
             ),
             header.last_id.checked_sub(1),
+            header.quantization_params,
         ))
     }
 
@@ -195,7 +207,8 @@ impl<W: Weight> InvertedIndexCompressedMmap<W> {
         index: &InvertedIndexCompressedImmutableRam<W>,
         path: P,
     ) -> std::io::Result<Self> {
-        let total_posting_headers_size = index.postings.as_slice().len() * POSTING_HEADER_SIZE;
+        let total_posting_headers_size =
+            index.postings.as_slice().len() * size_of::<PostingListFileHeader<W>>();
 
         let file_length = total_posting_headers_size
             + index
@@ -213,11 +226,12 @@ impl<W: Weight> InvertedIndexCompressedMmap<W> {
         let mut offset: usize = total_posting_headers_size;
         for posting in index.postings.as_slice() {
             let store_size = posting.view().store_size();
-            let posting_header = PostingListFileHeader {
+            let posting_header = PostingListFileHeader::<W> {
                 ids_start: offset as u64,
                 ids_len: store_size.id_data_bytes as u32,
                 chunks_count: store_size.chunks_count as u32,
                 last_id: posting.view().last_id().map_or(0, |id| id + 1),
+                quantization_params: posting.view().multiplier(),
             };
             buf.write_all(transmute_to_u8(&posting_header))?;
             offset += store_size.total;
@@ -273,6 +287,7 @@ mod tests {
     use tempfile::Builder;
 
     use super::*;
+    use crate::common::types::QuantizedU8;
     use crate::index::inverted_index::inverted_index_ram_builder::InvertedIndexBuilder;
 
     fn compare_indexes<W: Weight>(
@@ -290,6 +305,8 @@ mod tests {
     fn test_inverted_index_mmap() {
         check_inverted_index_mmap::<f32>();
         check_inverted_index_mmap::<half::f16>();
+        check_inverted_index_mmap::<u8>();
+        check_inverted_index_mmap::<QuantizedU8>();
     }
 
     fn check_inverted_index_mmap<W: Weight>() {

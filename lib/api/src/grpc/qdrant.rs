@@ -4837,7 +4837,7 @@ pub struct PrefetchQuery {
     pub filter: ::core::option::Option<Filter>,
     /// Search params for when there is no prefetch.
     #[prost(message, optional, tag = "5")]
-    pub search_params: ::core::option::Option<SearchParams>,
+    pub params: ::core::option::Option<SearchParams>,
     /// Return points with scores better than this threshold.
     #[prost(float, optional, tag = "6")]
     pub score_threshold: ::core::option::Option<f32>,
@@ -4872,7 +4872,8 @@ pub struct QueryPoints {
     pub filter: ::core::option::Option<Filter>,
     /// Search params for when there is no prefetch.
     #[prost(message, optional, tag = "6")]
-    pub search_params: ::core::option::Option<SearchParams>,
+    #[validate]
+    pub params: ::core::option::Option<SearchParams>,
     /// Return points with scores better than this threshold.
     #[prost(float, optional, tag = "7")]
     pub score_threshold: ::core::option::Option<f32>,
@@ -5300,6 +5301,9 @@ pub struct RetrievedPoint {
     /// Shard key
     #[prost(message, optional, tag = "5")]
     pub shard_key: ::core::option::Option<ShardKey>,
+    /// Order-by value
+    #[prost(message, optional, tag = "6")]
+    pub order_value: ::core::option::Option<OrderValue>,
 }
 #[derive(serde::Serialize)]
 #[allow(clippy::derive_partial_eq_without_eq)]

@@ -98,6 +98,8 @@ pub struct Record {
     /// Shard Key
     #[serde(skip_serializing_if = "Option::is_none")]
     pub shard_key: Option<segment::types::ShardKey>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub order_value: Option<segment::data_types::order_by::OrderValue>,
 }
 
 /// Vector data separator for named and unnamed modes
@@ -132,10 +134,12 @@ pub enum OrderByInterface {
     Struct(OrderBy),
 }
 
+/// Fusion algorithm allows to combine results of multiple prefetches.
+/// Available fusion algorithms:
+/// * `rrf` - Rank Reciprocal Fusion
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum Fusion {
-    /// Reciprocal rank fusion
     Rrf,
 }
 
@@ -168,12 +172,14 @@ pub struct QueryRequestInternal {
     pub filter: Option<Filter>,
 
     /// Search params for when there is no prefetch
+    #[validate]
     pub params: Option<SearchParams>,
 
     /// Return points with scores better than this threshold.
     pub score_threshold: Option<ScoreType>,
 
     /// Max number of points to return. Default is 10.
+    #[validate(range(min = 1))]
     pub limit: Option<usize>,
 
     /// Offset of the result. Skip this many points. Default is 0
@@ -295,12 +301,14 @@ pub struct Prefetch {
     pub filter: Option<Filter>,
 
     /// Search params for when there is no prefetch
+    #[validate]
     pub params: Option<SearchParams>,
 
     /// Return points with scores better than this threshold.
     pub score_threshold: Option<ScoreType>,
 
     /// Max number of points to return. Default is 10.
+    #[validate(range(min = 1))]
     pub limit: Option<usize>,
 
     /// The location to use for IDs lookup, if not specified - use the current collection and the 'using' vector
