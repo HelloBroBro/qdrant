@@ -333,7 +333,7 @@ impl CheckableCollectionOperation for CollectionQueryRequest {
             view.check_vector_query(vector_query)?
         }
 
-        // TODO(universal-query): implement lookup_from
+        access.check_lookup_from(&self.lookup_from)?;
 
         for prefetch_query in self.prefetch.iter_mut() {
             check_access_for_prefetch(prefetch_query, &view, access)?;
@@ -346,7 +346,7 @@ impl CheckableCollectionOperation for CollectionQueryRequest {
 fn check_access_for_prefetch(
     prefetch: &mut CollectionPrefetch,
     view: &CollectionAccessView<'_>,
-    _access: &CollectionAccessList, // TODO(universal_query): implement lookup_from
+    access: &CollectionAccessList,
 ) -> Result<(), StorageError> {
     view.apply_filter(&mut prefetch.filter);
 
@@ -354,11 +354,11 @@ fn check_access_for_prefetch(
         view.check_vector_query(vector_query)?
     }
 
-    // TODO(universal-query): implement lookup_from
+    access.check_lookup_from(&prefetch.lookup_from)?;
 
     // Recurse inner prefetches
     for prefetch_query in prefetch.prefetch.iter_mut() {
-        check_access_for_prefetch(prefetch_query, view, _access)?;
+        check_access_for_prefetch(prefetch_query, view, access)?;
     }
 
     Ok(())
@@ -613,7 +613,7 @@ mod tests_ops {
     use std::fmt::Debug;
 
     use api::rest::{
-        BatchVectorStruct, LookupLocation, OrderByInterface, RecommendStrategy,
+        self, BatchVectorStruct, LookupLocation, OrderByInterface, RecommendStrategy,
         SearchRequestInternal, VectorStruct,
     };
     use collection::operations::payload_ops::PayloadOpsDiscriminants;
@@ -868,7 +868,7 @@ mod tests_ops {
         let op = GroupRequest {
             // NOTE: SourceRequest::Recommend is already tested in test_recommend_request_internal
             source: SourceRequest::Search(SearchRequestInternal {
-                vector: NamedVectorStruct::Default(vec![0.0, 1.0, 2.0]).into(),
+                vector: rest::NamedVectorStruct::Default(vec![0.0, 1.0, 2.0]),
                 filter: None,
                 params: Some(SearchParams::default()),
                 limit: 100,
