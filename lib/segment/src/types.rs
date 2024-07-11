@@ -1,6 +1,7 @@
 use std::any;
+use std::borrow::Cow;
 use std::cmp::Ordering;
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 use std::fmt::{self, Display, Formatter};
 use std::hash::Hash;
 use std::ops::Deref;
@@ -25,22 +26,22 @@ use validator::{Validate, ValidationError, ValidationErrors};
 
 use crate::common::operation_error::{OperationError, OperationResult};
 use crate::common::utils::{self, MaybeOneOrMany, MultiValue};
-use crate::data_types::integer_index::IntegerIndexParams;
+use crate::data_types::index::{
+    BoolIndexParams, DatetimeIndexParams, FloatIndexParams, GeoIndexParams, IntegerIndexParams,
+    KeywordIndexParams, TextIndexParams,
+};
 use crate::data_types::order_by::OrderValue;
-use crate::data_types::text_index::TextIndexParams;
 use crate::data_types::vectors::VectorStructInternal;
 use crate::index::field_index::CardinalityEstimation;
 use crate::index::sparse_index::sparse_index_config::SparseIndexConfig;
 use crate::json_path::{JsonPath, JsonPathInterface};
 use crate::spaces::metric::MetricPostProcessing;
 use crate::spaces::simple::{CosineMetric, DotProductMetric, EuclidMetric, ManhattanMetric};
-use crate::vector_storage::simple_sparse_vector_storage::SPARSE_VECTOR_DISTANCE;
 
 pub type PayloadKeyType = JsonPath;
 pub type PayloadKeyTypeRef<'a> = &'a JsonPath;
 /// Sequential number of modification, applied to segment
 pub type SeqNumberType = u64;
-pub type TagType = u64;
 /// Type of float point payload
 pub type FloatPayloadType = f64;
 /// Type of integer point payload
@@ -82,11 +83,21 @@ impl From<chrono::DateTime<chrono::Utc>> for DateTimeWrapper {
     }
 }
 
+fn id_num_example() -> u64 {
+    42
+}
+
+fn id_uuid_example() -> String {
+    "550e8400-e29b-41d4-a716-446655440000".to_string()
+}
+
 /// Type, used for specifying point ID in user interface
 #[derive(Debug, Serialize, Copy, Clone, PartialEq, Eq, Hash, Ord, PartialOrd, JsonSchema)]
 #[serde(untagged)]
 pub enum ExtendedPointId {
+    #[schemars(example = "id_num_example")]
     NumId(u64),
+    #[schemars(example = "id_uuid_example")]
     Uuid(Uuid),
 }
 
@@ -274,17 +285,10 @@ impl PayloadIndexInfo {
                 params: None,
                 points: points_count,
             },
-            PayloadFieldSchema::FieldParams(schema_params) => match schema_params {
-                PayloadSchemaParams::Text(_) => PayloadIndexInfo {
-                    data_type: PayloadSchemaType::Text,
-                    params: Some(schema_params),
-                    points: points_count,
-                },
-                PayloadSchemaParams::Integer(_) => PayloadIndexInfo {
-                    data_type: PayloadSchemaType::Integer,
-                    params: Some(schema_params),
-                    points: points_count,
-                },
+            PayloadFieldSchema::FieldParams(schema_params) => PayloadIndexInfo {
+                data_type: schema_params.kind(),
+                params: Some(schema_params),
+                points: points_count,
             },
         }
     }
@@ -656,27 +660,10 @@ impl Default for HnswConfig {
     }
 }
 
-impl Indexes {
-    pub fn default_hnsw() -> Self {
-        Indexes::Hnsw(Default::default())
-    }
-}
-
 impl Default for Indexes {
     fn default() -> Self {
         Indexes::Plain {}
     }
-}
-
-/// Type of payload index
-#[derive(Default, Debug, Deserialize, Serialize, JsonSchema, Copy, Clone, PartialEq, Eq)]
-#[serde(tag = "type", content = "options", rename_all = "snake_case")]
-pub enum PayloadIndexType {
-    // Do not index anything, just keep of what should be indexed later
-    #[default]
-    Plain,
-    // Build payload index. Index is saved on disc, but index itself is in RAM
-    Struct,
 }
 
 /// Type of payload storage
@@ -718,20 +705,6 @@ impl SegmentConfig {
         self.vector_data
             .get(vector_name)
             .and_then(|v| v.quantization_config.as_ref())
-    }
-
-    pub fn distance(&self, vector_name: &str) -> Option<Distance> {
-        let distance = self
-            .vector_data
-            .get(vector_name)
-            .map(|config| config.distance);
-        if distance.is_none() {
-            self.sparse_vector_data
-                .get(vector_name)
-                .map(|_config| SPARSE_VECTOR_DISTANCE)
-        } else {
-            distance
-        }
     }
 
     /// Check if any vector storages are indexed
@@ -1002,10 +975,6 @@ impl Payload {
     pub fn contains_key(&self, key: &str) -> bool {
         self.0.contains_key(key)
     }
-
-    pub fn iter(&self) -> serde_json::map::Iter {
-        self.0.iter()
-    }
 }
 
 impl PayloadContainer for Map<String, Value> {
@@ -1123,25 +1092,6 @@ pub enum PayloadVariant<T> {
     Value(T),
 }
 
-impl<T: Clone> PayloadVariant<T> {
-    pub fn to_list(&self) -> Vec<T> {
-        match self {
-            PayloadVariant::Value(x) => vec![x.clone()],
-            PayloadVariant::List(vec) => vec.clone(),
-        }
-    }
-}
-
-/// Json representation of a payload
-#[derive(Debug, Deserialize, Serialize, JsonSchema, Clone, PartialEq)]
-#[serde(untagged, rename_all = "snake_case")]
-pub enum JsonPayload {
-    Keyword(PayloadVariant<String>),
-    Integer(PayloadVariant<IntPayloadType>),
-    Float(PayloadVariant<FloatPayloadType>),
-    Geo(PayloadVariant<GeoPoint>),
-}
-
 /// All possible names of payload types
 #[derive(Debug, Deserialize, Serialize, JsonSchema, Clone, Copy, PartialEq, Hash, Eq, EnumIter)]
 #[serde(rename_all = "snake_case")]
@@ -1160,20 +1110,49 @@ impl PayloadSchemaType {
     pub fn name(&self) -> &'static str {
         serde_variant::to_variant_name(&self).unwrap_or("unknown")
     }
+
+    pub fn expand(&self) -> PayloadSchemaParams {
+        match self {
+            Self::Keyword => PayloadSchemaParams::Keyword(KeywordIndexParams::default()),
+            Self::Integer => PayloadSchemaParams::Integer(IntegerIndexParams::default()),
+            Self::Float => PayloadSchemaParams::Float(FloatIndexParams::default()),
+            Self::Geo => PayloadSchemaParams::Geo(GeoIndexParams::default()),
+            Self::Text => PayloadSchemaParams::Text(TextIndexParams::default()),
+            Self::Bool => PayloadSchemaParams::Bool(BoolIndexParams::default()),
+            Self::Datetime => PayloadSchemaParams::Datetime(DatetimeIndexParams::default()),
+        }
+    }
 }
 
 /// Payload type with parameters
 #[derive(Debug, Deserialize, Serialize, JsonSchema, Clone, PartialEq, Hash, Eq)]
 #[serde(untagged, rename_all = "snake_case")]
 pub enum PayloadSchemaParams {
-    Text(TextIndexParams),
+    Keyword(KeywordIndexParams),
     Integer(IntegerIndexParams),
+    Float(FloatIndexParams),
+    Geo(GeoIndexParams),
+    Text(TextIndexParams),
+    Bool(BoolIndexParams),
+    Datetime(DatetimeIndexParams),
 }
 
 impl PayloadSchemaParams {
     /// Human readable type name
     pub fn name(&self) -> &'static str {
-        serde_variant::to_variant_name(&self).unwrap_or("unknown")
+        self.kind().name()
+    }
+
+    pub fn kind(&self) -> PayloadSchemaType {
+        match self {
+            PayloadSchemaParams::Keyword(_) => PayloadSchemaType::Keyword,
+            PayloadSchemaParams::Integer(_) => PayloadSchemaType::Integer,
+            PayloadSchemaParams::Float(_) => PayloadSchemaType::Float,
+            PayloadSchemaParams::Geo(_) => PayloadSchemaType::Geo,
+            PayloadSchemaParams::Text(_) => PayloadSchemaType::Text,
+            PayloadSchemaParams::Bool(_) => PayloadSchemaType::Bool,
+            PayloadSchemaParams::Datetime(_) => PayloadSchemaType::Datetime,
+        }
     }
 }
 
@@ -1185,22 +1164,10 @@ pub enum PayloadFieldSchema {
 }
 
 impl PayloadFieldSchema {
-    pub fn has_range_index(&self) -> bool {
+    pub fn expand(&self) -> Cow<'_, PayloadSchemaParams> {
         match self {
-            PayloadFieldSchema::FieldType(PayloadSchemaType::Integer)
-            | PayloadFieldSchema::FieldType(PayloadSchemaType::Datetime)
-            | PayloadFieldSchema::FieldType(PayloadSchemaType::Float) => true,
-
-            PayloadFieldSchema::FieldType(PayloadSchemaType::Bool)
-            | PayloadFieldSchema::FieldType(PayloadSchemaType::Keyword)
-            | PayloadFieldSchema::FieldType(PayloadSchemaType::Text)
-            | PayloadFieldSchema::FieldType(PayloadSchemaType::Geo)
-            | PayloadFieldSchema::FieldParams(PayloadSchemaParams::Text(_)) => false,
-
-            PayloadFieldSchema::FieldParams(PayloadSchemaParams::Integer(IntegerIndexParams {
-                range,
-                ..
-            })) => *range,
+            PayloadFieldSchema::FieldType(t) => Cow::Owned(t.expand()),
+            PayloadFieldSchema::FieldParams(p) => Cow::Borrowed(p),
         }
     }
 
@@ -1223,20 +1190,15 @@ impl TryFrom<PayloadIndexInfo> for PayloadFieldSchema {
     type Error = String;
 
     fn try_from(index_info: PayloadIndexInfo) -> Result<Self, Self::Error> {
-        let Some(params) = index_info.params else {
-            return Ok(PayloadFieldSchema::FieldType(index_info.data_type));
-        };
-
-        match (index_info.data_type, params) {
-            (PayloadSchemaType::Text, PayloadSchemaParams::Text(params)) => Ok(
-                PayloadFieldSchema::FieldParams(PayloadSchemaParams::Text(params)),
-            ),
-            (PayloadSchemaType::Integer, PayloadSchemaParams::Integer(params)) => Ok(
-                PayloadFieldSchema::FieldParams(PayloadSchemaParams::Integer(params)),
-            ),
-            (data_type, PayloadSchemaParams::Integer(_) | PayloadSchemaParams::Text(_)) => Err(
-                format!("Payload field with type {data_type:?} has unexpected params"),
-            ),
+        match index_info.params {
+            Some(params) if params.kind() == index_info.data_type => {
+                Ok(PayloadFieldSchema::FieldParams(params))
+            }
+            Some(_) => Err(format!(
+                "Payload field with type {:?} has unexpected params",
+                index_info.data_type,
+            )),
+            None => Ok(PayloadFieldSchema::FieldType(index_info.data_type)),
         }
     }
 }
@@ -1708,19 +1670,6 @@ impl GeoPolygon {
             polygon: Polygon::new(exterior_line, interior_lines),
         }
     }
-
-    pub fn new(exterior: &GeoLineString, interiors: &Vec<GeoLineString>) -> OperationResult<Self> {
-        Self::validate_line_string(exterior)?;
-
-        for interior in interiors {
-            Self::validate_line_string(interior)?;
-        }
-
-        Ok(GeoPolygon {
-            exterior: exterior.clone(),
-            interiors: Some(interiors.to_vec()),
-        })
-    }
 }
 
 impl TryFrom<GeoPolygonShadow> for GeoPolygon {
@@ -2044,6 +1993,12 @@ impl From<bool> for WithPayloadInterface {
     }
 }
 
+impl Default for WithPayloadInterface {
+    fn default() -> Self {
+        WithPayloadInterface::Bool(false)
+    }
+}
+
 /// Options for specifying which vector to include
 #[derive(Debug, Deserialize, Serialize, JsonSchema, Clone, PartialEq, Eq)]
 #[serde(untagged, rename_all = "snake_case")]
@@ -2209,15 +2164,6 @@ pub struct WithPayload {
 pub struct MinShould {
     pub conditions: Vec<Condition>,
     pub min_count: usize,
-}
-
-impl MinShould {
-    pub fn new_min_should(condition: Condition, min_count: usize) -> Self {
-        MinShould {
-            conditions: vec![condition],
-            min_count,
-        }
-    }
 }
 
 #[derive(Debug, Deserialize, Serialize, JsonSchema, Validate, Clone, PartialEq, Default)]
@@ -3623,8 +3569,6 @@ mod tests {
         assert_eq!(payload, expected.into());
     }
 }
-
-pub type TheMap<K, V> = BTreeMap<K, V>;
 
 #[derive(Deserialize, Serialize, JsonSchema, Debug, Clone, PartialEq, Eq, Hash)]
 #[serde(untagged)]

@@ -21,7 +21,7 @@ pub const DB_VERSIONS_CF: &str = "version";
 /// If there is no Column Family specified, key-value pair is associated with Column Family "default".
 pub const DB_DEFAULT_CF: &str = "default";
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct DatabaseColumnWrapper {
     pub database: Arc<RwLock<DB>>,
     pub column_name: String,
@@ -90,28 +90,6 @@ pub fn open_db_with_existing_cf(path: &Path) -> Result<Arc<RwLock<DB>>, rocksdb:
     };
     let db = DB::open_cf(&db_options(), path, existing_column_families)?;
     Ok(Arc::new(RwLock::new(db)))
-}
-
-pub fn create_db_cf_if_not_exists(
-    db: Arc<RwLock<DB>>,
-    store_cf_name: &str,
-) -> Result<(), rocksdb::Error> {
-    let mut db_mut = db.write();
-    if db_mut.cf_handle(store_cf_name).is_none() {
-        db_mut.create_cf(store_cf_name, &db_options())?;
-    }
-    Ok(())
-}
-
-pub fn recreate_cf(db: Arc<RwLock<DB>>, store_cf_name: &str) -> Result<(), rocksdb::Error> {
-    let mut db_mut = db.write();
-
-    if db_mut.cf_handle(store_cf_name).is_some() {
-        db_mut.drop_cf(store_cf_name)?;
-    }
-
-    db_mut.create_cf(store_cf_name, &db_options())?;
-    Ok(())
 }
 
 impl DatabaseColumnWrapper {
