@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use api::rest::{QueryGroupsRequestInternal, SearchGroupsRequestInternal, ShardKeySelector};
+use api::rest::{SearchGroupsRequestInternal, ShardKeySelector};
 use collection::common::batching::batch_requests;
 use collection::grouping::group_by::GroupRequest;
 use collection::operations::consistency_params::ReadConsistency;
@@ -18,7 +18,9 @@ use collection::operations::types::{
     DiscoverRequestBatch, GroupsResult, PointRequestInternal, RecommendGroupsRequestInternal,
     Record, ScrollRequestInternal, ScrollResult, UpdateResult,
 };
-use collection::operations::universal_query::collection_query::CollectionQueryRequest;
+use collection::operations::universal_query::collection_query::{
+    CollectionQueryGroupsRequest, CollectionQueryRequest,
+};
 use collection::operations::vector_ops::{
     DeleteVectors, UpdateVectors, UpdateVectorsOp, VectorOperations,
 };
@@ -913,6 +915,7 @@ pub async fn do_count_points(
     collection_name: &str,
     request: CountRequestInternal,
     read_consistency: Option<ReadConsistency>,
+    timeout: Option<Duration>,
     shard_selection: ShardSelectorInternal,
     access: Access,
 ) -> Result<CountResult, StorageError> {
@@ -920,6 +923,7 @@ pub async fn do_count_points(
         collection_name,
         request,
         read_consistency,
+        timeout,
         shard_selection,
         access,
     )
@@ -931,6 +935,7 @@ pub async fn do_get_points(
     collection_name: &str,
     request: PointRequestInternal,
     read_consistency: Option<ReadConsistency>,
+    timeout: Option<Duration>,
     shard_selection: ShardSelectorInternal,
     access: Access,
 ) -> Result<Vec<Record>, StorageError> {
@@ -938,6 +943,7 @@ pub async fn do_get_points(
         collection_name,
         request,
         read_consistency,
+        timeout,
         shard_selection,
         access,
     )
@@ -949,6 +955,7 @@ pub async fn do_scroll_points(
     collection_name: &str,
     request: ScrollRequestInternal,
     read_consistency: Option<ReadConsistency>,
+    timeout: Option<Duration>,
     shard_selection: ShardSelectorInternal,
     access: Access,
 ) -> Result<ScrollResult, StorageError> {
@@ -956,6 +963,7 @@ pub async fn do_scroll_points(
         collection_name,
         request,
         read_consistency,
+        timeout,
         shard_selection,
         access,
     )
@@ -996,7 +1004,7 @@ pub async fn do_query_batch_points(
 pub async fn do_query_point_groups(
     toc: &TableOfContent,
     collection_name: &str,
-    request: QueryGroupsRequestInternal,
+    request: CollectionQueryGroupsRequest,
     read_consistency: Option<ReadConsistency>,
     shard_selection: ShardSelectorInternal,
     access: Access,

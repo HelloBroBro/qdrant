@@ -1118,3 +1118,197 @@ def test_discover_group():
     assert len(groups[1]["hits"]) == 1
     assert groups[1]["hits"][0]["id"] == 2
     assert groups[1]["hits"][0]["payload"]["city"] == ["Berlin", "London"]
+
+
+def test_recommend_lookup_group():
+    # delete lookup collection if exists
+    response = request_with_validation(
+        api='/collections/{collection_name}',
+        method="DELETE",
+        path_params={'collection_name': lookup_collection_name},
+    )
+    assert response.ok, response.text
+
+    # re-create lookup collection
+    response = request_with_validation(
+        api='/collections/{collection_name}',
+        method="PUT",
+        path_params={'collection_name': lookup_collection_name},
+        body={
+            "vectors": {
+                "other": {
+                    "size": 4,
+                    "distance": "Dot",
+                }
+            }
+        }
+    )
+    assert response.ok, response.text
+
+    # insert vectors to lookup collection
+    response = request_with_validation(
+        api='/collections/{collection_name}/points',
+        method="PUT",
+        path_params={'collection_name': lookup_collection_name},
+        query_params={'wait': 'true'},
+        body={
+            "points": [
+                {
+                    "id": 1,
+                    "vector": {"other": [10.0, 10.0, 10.0, 10.0]},
+                },
+                {
+                    "id": 2,
+                    "vector": {"other": [20.0, 0.0, 0.0, 0.0]},
+                },
+            ]
+        }
+    )
+    assert response.ok, response.text
+
+    # check recommend group + lookup_from
+    response = request_with_validation(
+        api="/collections/{collection_name}/points/recommend/groups",
+        method="POST",
+        path_params={"collection_name": collection_name},
+        body={
+            "positive": [1],
+            "negative": [2],
+            "limit": 10,
+            "using": "dense-image",
+            "lookup_from": {
+                "collection": lookup_collection_name,
+                "vector": "other"
+            },
+            "group_by": "city",
+            "group_size": 2,
+        },
+    )
+    assert response.ok, response.text
+    recommend_result = response.json()["result"]
+
+    # check query + lookup_from
+    response = request_with_validation(
+        api="/collections/{collection_name}/points/query/groups",
+        method="POST",
+        path_params={"collection_name": collection_name},
+        body={
+            "query": {
+                "recommend": {
+                    "positive": [1],
+                    "negative": [2],
+                },
+            },
+            "limit": 10,
+            "using": "dense-image",
+            "lookup_from": {
+                "collection": lookup_collection_name,
+                "vector": "other"
+            },
+            "group_by": "city",
+            "group_size": 2,
+        },
+    )
+    assert response.ok, response.text
+    query_result = response.json()["result"]
+
+    # check equivalence recommend vs query
+    assert recommend_result == query_result, f"{recommend_result} != {query_result}"
+
+    # check nested query id + lookup_from
+    response = request_with_validation(
+        api="/collections/{collection_name}/points/query/groups",
+        method="POST",
+        path_params={"collection_name": collection_name},
+        body={
+            "prefetch": [
+                {
+                    "query": {
+                        "recommend": {
+                            "positive": [1],
+                            "negative": [2],
+                        },
+                    },
+                    "using": "dense-image",
+                    "lookup_from": {
+                        "collection": lookup_collection_name,
+                        "vector": "other"
+                    },
+                }
+            ],
+            "group_by": "city",
+            "group_size": 2,
+            "query": {"fusion": "rrf"},
+        },
+    )
+    assert response.ok, response.text
+    nested_query_result_id = response.json()["result"]
+
+    # check nested query vector + lookup_from
+    response = request_with_validation(
+        api="/collections/{collection_name}/points/query/groups",
+        method="POST",
+        path_params={"collection_name": collection_name},
+        body={
+            "prefetch": [
+                {
+                    "query": {
+                        "recommend": {
+                            "positive": [[10.0, 10.0, 10.0, 10.0]],
+                            "negative": [[20.0, 0.0, 0.0, 0.0]],
+                        },
+                    },
+                    "using": "dense-image",
+                }
+            ],
+            "group_by": "city",
+            "group_size": 2,
+            "query": {"fusion": "rrf"},
+        },
+    )
+    assert response.ok, response.text
+    nested_query_result_vector = response.json()["result"]
+
+    # check equivalence nested query id vs nested query vector
+    assert nested_query_result_id == nested_query_result_vector, f"{nested_query_result_id} != {nested_query_result_vector}"
+
+
+def test_random_rescore_with_offset():
+    response = request_with_validation(
+        api="/collections/{collection_name}/points/query",
+        method="POST",
+        path_params={"collection_name": collection_name},
+        body={
+            "prefetch": { "limit": 1 },
+            "query": {"sample": "random"},
+        },
+    )
+    assert response.ok, response.json()
+    random_result = response.json()["result"]["points"]
+    assert len(random_result) == 1
+    assert random_result[0]["id"] == 1
+    
+    # assert offset is propagated to prefetch
+    seen = set()
+    for _ in range(100):
+        response = request_with_validation(
+            api="/collections/{collection_name}/points/query",
+            method="POST",
+            path_params={"collection_name": collection_name},
+            body={
+                "prefetch": { "limit": 1 },
+                "query": {"sample": "random"},
+                "offset": 1,
+            },
+        )
+        assert response.ok, response.json()
+        random_result = response.json()["result"]["points"]
+        assert len(random_result) == 1
+    
+        seen.add(random_result[0]["id"])
+        if seen == {1, 2}:
+            return
+    
+    # Although prefetch limit is 1, offset should be propagated, so randomness is applied to points 1 and 2.
+    # By this point we should've seen both points.
+    assert False, f"after 100 tries, `seen` is expected to be {{1, 2}}, but it was {seen}"

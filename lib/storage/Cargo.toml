@@ -8,6 +8,9 @@ authors = [
 license = "Apache-2.0"
 edition = "2021"
 
+[lints]
+workspace = true
+
 [features]
 tracing = ["dep:tracing", "api/tracing", "collection/tracing", "segment/tracing"]
 
@@ -36,7 +39,7 @@ validator = { workspace = true }
 # Consensus related
 atomicwrites = { version = "0.4.3" }
 raft = { version = "0.7.0", features = ["prost-codec"], default-features = false }
-prost = { workspace = true } # version of prost used by raft
+prost-for-raft = { workspace = true }
 protobuf = "2.28.0" # version of protobuf used by raft
 serde_cbor = { workspace = true }
 

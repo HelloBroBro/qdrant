@@ -1,9 +1,11 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::AtomicBool;
 
 use common::types::TelemetryDetail;
 
 use crate::common::operation_error::{OperationResult, SegmentFailedState};
+use crate::data_types::facets::{FacetHit, FacetRequest, FacetValue};
 use crate::data_types::named_vectors::NamedVectors;
 use crate::data_types::order_by::{OrderBy, OrderValue};
 use crate::data_types::query_context::{QueryContext, SegmentQueryContext};
@@ -108,26 +110,48 @@ pub trait SegmentEntry {
     fn iter_points(&self) -> Box<dyn Iterator<Item = PointIdType> + '_>;
 
     /// Paginate over points which satisfies filtering condition starting with `offset` id including.
+    ///
+    /// Cancelled by `is_stopped` flag.
     fn read_filtered<'a>(
         &'a self,
         offset: Option<PointIdType>,
         limit: Option<usize>,
         filter: Option<&'a Filter>,
+        is_stopped: &AtomicBool,
     ) -> Vec<PointIdType>;
 
     /// Return points which satisfies filtering condition ordered by the `order_by.key` field,
     /// starting with `order_by.start_from` value including.
     ///
     /// Will fail if there is no index for the order_by key.
+    /// Cancelled by `is_stopped` flag.
     fn read_ordered_filtered<'a>(
         &'a self,
         limit: Option<usize>,
         filter: Option<&'a Filter>,
         order_by: &'a OrderBy,
+        is_stopped: &AtomicBool,
     ) -> OperationResult<Vec<(OrderValue, PointIdType)>>;
+
+    /// Return random points which satisfies filtering condition.
+    ///
+    /// Cancelled by `is_stopped` flag.
+    fn read_random_filtered(
+        &self,
+        limit: usize,
+        filter: Option<&Filter>,
+        is_stopped: &AtomicBool,
+    ) -> Vec<PointIdType>;
 
     /// Read points in [from; to) range
     fn read_range(&self, from: Option<PointIdType>, to: Option<PointIdType>) -> Vec<PointIdType>;
+
+    /// Return the largest counts for the given facet request.
+    fn facet(
+        &self,
+        request: &FacetRequest,
+        is_stopped: &AtomicBool,
+    ) -> OperationResult<Vec<FacetHit<FacetValue>>>;
 
     /// Check if there is point with `point_id` in this segment.
     fn has_point(&self, point_id: PointIdType) -> bool;

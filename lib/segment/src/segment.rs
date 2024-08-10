@@ -3,17 +3,20 @@ use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::fs::{self, File};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 
 use atomic_refcell::AtomicRefCell;
 use bitvec::prelude::BitVec;
+use common::iterator_ext::IteratorExt;
 use common::types::{PointOffsetType, ScoredPointOffset, TelemetryDetail};
 use io::file_operations::{atomic_save_json, read_json};
 use io::storage_version::{StorageVersion, VERSION_FILE};
-use itertools::Either;
+use itertools::{Either, Itertools};
 use memory::mmap_ops;
 use parking_lot::{Mutex, RwLock};
+use rand::seq::{IteratorRandom, SliceRandom};
 use rocksdb::DB;
 use tar::Builder;
 use uuid::Uuid;
@@ -24,6 +27,7 @@ use crate::common::operation_error::{
 };
 use crate::common::validate_snapshot_archive::open_snapshot_archive_with_validation;
 use crate::common::{check_named_vectors, check_query_vectors, check_stopped, check_vector_name};
+use crate::data_types::facets::{FacetHit, FacetRequest, FacetValueHit};
 use crate::data_types::named_vectors::NamedVectors;
 use crate::data_types::order_by::{Direction, OrderBy, OrderValue};
 use crate::data_types::query_context::{QueryContext, SegmentQueryContext};
@@ -40,7 +44,7 @@ use crate::telemetry::SegmentTelemetry;
 use crate::types::{
     Filter, Payload, PayloadFieldSchema, PayloadIndexInfo, PayloadKeyType, PayloadKeyTypeRef,
     PayloadSchemaType, PointIdType, ScoredPoint, SearchParams, SegmentConfig, SegmentInfo,
-    SegmentState, SegmentType, SeqNumberType, VectorDataInfo, WithPayload, WithVector,
+    SegmentState, SegmentType, SeqNumberType, VectorDataInfo, VectorName, WithPayload, WithVector,
 };
 use crate::utils;
 use crate::utils::fs::find_symlink;
@@ -81,7 +85,7 @@ pub struct Segment {
     pub current_path: PathBuf,
     /// Component for mapping external ids to internal and also keeping track of point versions
     pub id_tracker: Arc<AtomicRefCell<IdTrackerSS>>,
-    pub vector_data: HashMap<String, VectorData>,
+    pub vector_data: HashMap<VectorName, VectorData>,
     pub payload_index: Arc<AtomicRefCell<StructPayloadIndex>>,
     /// Shows if it is possible to insert more points into this segment
     pub appendable_flag: bool,
@@ -473,10 +477,7 @@ impl Segment {
         }
     }
 
-    fn all_vectors_by_offset(
-        &self,
-        point_offset: PointOffsetType,
-    ) -> OperationResult<NamedVectors> {
+    fn all_vectors_by_offset(&self, point_offset: PointOffsetType) -> NamedVectors {
         let mut vectors = NamedVectors::default();
         for (vector_name, vector_data) in &self.vector_data {
             let is_vector_deleted = vector_data
@@ -492,7 +493,7 @@ impl Segment {
                 vectors.insert(vector_name.clone(), vector);
             }
         }
-        Ok(vectors)
+        vectors
     }
 
     /// Retrieve payload by internal ID
@@ -543,8 +544,7 @@ impl Segment {
 
             if let Some(symlink) = find_symlink(&files_path) {
                 return Err(OperationError::service_error(format!(
-                    "Snapshot is corrupted, can't read file: {:?}",
-                    symlink
+                    "Snapshot is corrupted, can't read file: {symlink:?}"
                 )));
             }
 
@@ -634,9 +634,7 @@ impl Segment {
                 };
                 let vector = match with_vector {
                     WithVector::Bool(false) => None,
-                    WithVector::Bool(true) => {
-                        Some(self.all_vectors_by_offset(point_offset)?.into())
-                    }
+                    WithVector::Bool(true) => Some(self.all_vectors_by_offset(point_offset).into()),
                     WithVector::Selector(vectors) => {
                         let mut result = NamedVectors::default();
                         for vector_name in vectors {
@@ -719,18 +717,29 @@ impl Segment {
             .collect()
     }
 
+    fn read_by_random_id(&self, limit: usize) -> Vec<PointIdType> {
+        self.id_tracker
+            .borrow()
+            .iter_random()
+            .map(|x| x.0)
+            .take(limit)
+            .collect()
+    }
+
     pub fn filtered_read_by_index(
         &self,
         offset: Option<PointIdType>,
         limit: Option<usize>,
         condition: &Filter,
+        is_stopped: &AtomicBool,
     ) -> Vec<PointIdType> {
         let payload_index = self.payload_index.borrow();
         let id_tracker = self.id_tracker.borrow();
+        let cardinality_estimation = payload_index.estimate_cardinality(condition);
 
         let ids_iterator = payload_index
-            .query_points(condition)
-            .into_iter()
+            .iter_filtered_points(condition, &*id_tracker, &cardinality_estimation)
+            .check_stop(|| is_stopped.load(Ordering::Relaxed))
             .filter_map(|internal_id| {
                 let external_id = id_tracker.external_id(internal_id);
                 match external_id {
@@ -757,6 +766,7 @@ impl Segment {
         order_by: &OrderBy,
         limit: Option<usize>,
         condition: &Filter,
+        is_stopped: &AtomicBool,
     ) -> OperationResult<Vec<(OrderValue, PointIdType)>> {
         let payload_index = self.payload_index.borrow();
         let id_tracker = self.id_tracker.borrow();
@@ -769,16 +779,18 @@ impl Segment {
                 key: order_by.key.to_string(),
             })?;
 
+        let cardinality_estimation = payload_index.estimate_cardinality(condition);
+
         let start_from = order_by.start_from();
 
         let values_ids_iterator = payload_index
-            .query_points(condition)
-            .into_iter()
+            .iter_filtered_points(condition, &*id_tracker, &cardinality_estimation)
+            .check_stop(|| is_stopped.load(Ordering::Relaxed))
             .flat_map(|internal_id| {
                 // Repeat a point for as many values as it has
                 numeric_index
                     .get_ordering_values(internal_id)
-                    // But only those which start from `start_from` 😛
+                    // But only those which start from `start_from`
                     .filter(|value| match order_by.direction() {
                         Direction::Asc => value >= &start_from,
                         Direction::Desc => value <= &start_from,
@@ -813,17 +825,41 @@ impl Segment {
         Ok(page)
     }
 
+    fn filtered_read_by_index_shuffled(
+        &self,
+        limit: usize,
+        condition: &Filter,
+        is_stopped: &AtomicBool,
+    ) -> Vec<PointIdType> {
+        let payload_index = self.payload_index.borrow();
+        let id_tracker = self.id_tracker.borrow();
+
+        let cardinality_estimation = payload_index.estimate_cardinality(condition);
+        let ids_iterator = payload_index
+            .iter_filtered_points(condition, &*id_tracker, &cardinality_estimation)
+            .check_stop(|| is_stopped.load(Ordering::Relaxed))
+            .filter_map(|internal_id| id_tracker.external_id(internal_id));
+
+        let mut rng = rand::thread_rng();
+        let mut shuffled = ids_iterator.choose_multiple(&mut rng, limit);
+        shuffled.shuffle(&mut rng);
+
+        shuffled
+    }
+
     pub fn filtered_read_by_id_stream(
         &self,
         offset: Option<PointIdType>,
         limit: Option<usize>,
         condition: &Filter,
+        is_stopped: &AtomicBool,
     ) -> Vec<PointIdType> {
         let payload_index = self.payload_index.borrow();
         let filter_context = payload_index.filter_context(condition);
         self.id_tracker
             .borrow()
             .iter_from(offset)
+            .check_stop(|| is_stopped.load(Ordering::Relaxed))
             .filter(move |(_, internal_id)| filter_context.check(*internal_id))
             .map(|(external_id, _)| external_id)
             .take(limit.unwrap_or(usize::MAX))
@@ -835,6 +871,7 @@ impl Segment {
         order_by: &OrderBy,
         limit: Option<usize>,
         filter: Option<&Filter>,
+        is_stopped: &AtomicBool,
     ) -> OperationResult<Vec<(OrderValue, PointIdType)>> {
         let payload_index = self.payload_index.borrow();
 
@@ -868,6 +905,7 @@ impl Segment {
         };
 
         let reads = filtered_iter
+            .check_stop(|| is_stopped.load(Ordering::Relaxed))
             .filter_map(|(value, internal_id)| {
                 id_tracker
                     .external_id(internal_id)
@@ -876,6 +914,24 @@ impl Segment {
             .take(limit.unwrap_or(usize::MAX))
             .collect();
         Ok(reads)
+    }
+
+    pub fn filtered_read_by_random_stream(
+        &self,
+        limit: usize,
+        condition: &Filter,
+        is_stopped: &AtomicBool,
+    ) -> Vec<PointIdType> {
+        let payload_index = self.payload_index.borrow();
+        let filter_context = payload_index.filter_context(condition);
+        self.id_tracker
+            .borrow()
+            .iter_random()
+            .check_stop(|| is_stopped.load(Ordering::Relaxed))
+            .filter(move |(_, internal_id)| filter_context.check(*internal_id))
+            .map(|(external_id, _)| external_id)
+            .take(limit)
+            .collect()
     }
 
     /// Check consistency of the segment's data and repair it if possible.
@@ -1361,14 +1417,15 @@ impl SegmentEntry for Segment {
         offset: Option<PointIdType>,
         limit: Option<usize>,
         filter: Option<&'a Filter>,
+        is_stopped: &AtomicBool,
     ) -> Vec<PointIdType> {
         match filter {
             None => self.read_by_id_stream(offset, limit),
             Some(condition) => {
                 if self.should_pre_filter(condition, limit) {
-                    self.filtered_read_by_index(offset, limit, condition)
+                    self.filtered_read_by_index(offset, limit, condition, is_stopped)
                 } else {
-                    self.filtered_read_by_id_stream(offset, limit, condition)
+                    self.filtered_read_by_id_stream(offset, limit, condition, is_stopped)
                 }
             }
         }
@@ -1379,14 +1436,33 @@ impl SegmentEntry for Segment {
         limit: Option<usize>,
         filter: Option<&'a Filter>,
         order_by: &'a OrderBy,
+        is_stopped: &AtomicBool,
     ) -> OperationResult<Vec<(OrderValue, PointIdType)>> {
         match filter {
-            None => self.filtered_read_by_value_stream(order_by, limit, None),
+            None => self.filtered_read_by_value_stream(order_by, limit, None, is_stopped),
             Some(filter) => {
                 if self.should_pre_filter(filter, limit) {
-                    self.filtered_read_by_index_ordered(order_by, limit, filter)
+                    self.filtered_read_by_index_ordered(order_by, limit, filter, is_stopped)
                 } else {
-                    self.filtered_read_by_value_stream(order_by, limit, Some(filter))
+                    self.filtered_read_by_value_stream(order_by, limit, Some(filter), is_stopped)
+                }
+            }
+        }
+    }
+
+    fn read_random_filtered(
+        &self,
+        limit: usize,
+        filter: Option<&Filter>,
+        is_stopped: &AtomicBool,
+    ) -> Vec<PointIdType> {
+        match filter {
+            None => self.read_by_random_id(limit),
+            Some(condition) => {
+                if self.should_pre_filter(condition, Some(limit)) {
+                    self.filtered_read_by_index_shuffled(limit, condition, is_stopped)
+                } else {
+                    self.filtered_read_by_random_stream(limit, condition, is_stopped)
                 }
             }
         }
@@ -1437,6 +1513,57 @@ impl SegmentEntry for Segment {
                 payload_index.estimate_cardinality(filter)
             }
         }
+    }
+
+    fn facet(
+        &self,
+        request: &FacetRequest,
+        is_stopped: &AtomicBool,
+    ) -> OperationResult<Vec<FacetValueHit>> {
+        let payload_index = self.payload_index.borrow();
+
+        let facet_index = payload_index
+            .field_indexes
+            .get(&request.key)
+            .and_then(|index| index.iter().find_map(|index| index.as_facet_index()))
+            .ok_or_else(|| OperationError::MissingMapIndexForFacet {
+                key: request.key.to_string(),
+            })?;
+
+        let hits = if let Some(filter) = &request.filter {
+            let id_tracker = self.id_tracker.borrow();
+            let filter_cardinality = payload_index.estimate_cardinality(filter);
+
+            let hits_iter = payload_index
+                .iter_filtered_points(filter, &*id_tracker, &filter_cardinality)
+                .check_stop(|| is_stopped.load(Ordering::Relaxed))
+                .filter(|point_id| !id_tracker.is_deleted_point(*point_id))
+                .fold(HashMap::new(), |mut map, point_id| {
+                    facet_index.get_values(point_id).unique().for_each(|value| {
+                        *map.entry(value).or_insert(0) += 1;
+                    });
+                    map
+                })
+                .into_iter()
+                .map(|(value, count)| FacetHit { value, count });
+
+            peek_top_largest_iterable(hits_iter, request.limit)
+        } else {
+            let hits_iter = facet_index
+                .iter_counts_per_value()
+                .check_stop(|| !is_stopped.load(Ordering::Relaxed));
+            peek_top_largest_iterable(hits_iter, request.limit)
+        };
+
+        let hits = hits
+            .into_iter()
+            .map(|hit| FacetHit {
+                value: hit.value.to_owned(),
+                count: hit.count,
+            })
+            .collect();
+
+        Ok(hits)
     }
 
     fn segment_type(&self) -> SegmentType {
@@ -1705,8 +1832,9 @@ impl SegmentEntry for Segment {
         filter: &'a Filter,
     ) -> OperationResult<usize> {
         let mut deleted_points = 0;
-        for point_id in self.read_filtered(None, None, Some(filter)) {
-            deleted_points += self.delete_point(op_num, point_id)? as usize;
+        let is_stopped = AtomicBool::new(false);
+        for point_id in self.read_filtered(None, None, Some(filter), &is_stopped) {
+            deleted_points += usize::from(self.delete_point(op_num, point_id)?);
         }
 
         Ok(deleted_points)
@@ -1810,6 +1938,15 @@ impl SegmentEntry for Segment {
         }
 
         for file in self.payload_index.borrow().files() {
+            utils::tar::append_file_relative_to_base(
+                &mut builder,
+                &self.current_path,
+                &file,
+                &files,
+            )?;
+        }
+
+        for file in self.id_tracker.borrow().files() {
             utils::tar::append_file_relative_to_base(
                 &mut builder,
                 &self.current_path,

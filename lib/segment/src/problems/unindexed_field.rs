@@ -62,7 +62,7 @@ impl UnindexedField {
         }
 
         let endpoint = match Uri::builder()
-            .path_and_query(format!("/collections/{}/index", collection_name).as_str())
+            .path_and_query(format!("/collections/{collection_name}/index").as_str())
             .build()
         {
             Ok(uri) => uri,
@@ -323,7 +323,7 @@ impl<'a> Extractor<'a> {
             }
             // No index needed
             Condition::HasId(_) => return,
-            Condition::Resharding(_) => return,
+            Condition::CustomIdChecker(_) => return,
         };
 
         let full_key = JsonPath::extend_or_new(nested_prefix, key);

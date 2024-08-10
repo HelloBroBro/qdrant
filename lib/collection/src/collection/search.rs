@@ -45,6 +45,7 @@ impl Collection {
         shard_selection: ShardSelectorInternal,
         timeout: Option<Duration>,
     ) -> CollectionResult<Vec<Vec<ScoredPoint>>> {
+        let start = Instant::now();
         // shortcuts batch if all requests with limit=0
         if request.searches.iter().all(|s| s.limit == 0) {
             return Ok(vec![]);
@@ -53,12 +54,10 @@ impl Collection {
         // Should be adjusted based on usage statistics.
         const PAYLOAD_TRANSFERS_FACTOR_THRESHOLD: usize = 10;
 
-        let is_payload_required = request.searches.iter().all(|s| {
-            s.with_payload
-                .clone()
-                .map(|p| p.is_required())
-                .unwrap_or_default()
-        });
+        let is_payload_required = request
+            .searches
+            .iter()
+            .all(|s| s.with_payload.clone().is_some_and(|p| p.is_required()));
         let with_vectors = request.searches.iter().all(|s| {
             s.with_vector
                 .as_ref()
@@ -102,6 +101,8 @@ impl Collection {
                     timeout,
                 )
                 .await?;
+            // update timeout
+            let timeout = timeout.map(|t| t.saturating_sub(start.elapsed()));
             let filled_results = without_payload_results
                 .into_iter()
                 .zip(request.clone().searches.into_iter())
@@ -112,6 +113,7 @@ impl Collection {
                         req.with_vector.unwrap_or_default(),
                         read_consistency,
                         &shard_selection,
+                        timeout,
                     )
                 });
             future::try_join_all(filled_results).await
@@ -125,13 +127,28 @@ impl Collection {
 
     async fn do_core_search_batch(
         &self,
-        mut request: CoreSearchRequestBatch,
+        request: CoreSearchRequestBatch,
         read_consistency: Option<ReadConsistency>,
         shard_selection: &ShardSelectorInternal,
         timeout: Option<Duration>,
     ) -> CollectionResult<Vec<Vec<ScoredPoint>>> {
-        if let Some(resharding_filter) = self.shards_holder.read().await.resharding_filter() {
-            for search in &mut request.searches {
+        // Resharding filter to apply when resharding is active
+        let (resharding_filter, reshard_shard_id) = {
+            let shards_holder = self.shards_holder.read().await;
+            let resharding_filter = shards_holder.resharding_filter();
+            let reshard_shard_id = shards_holder
+                .resharding_state
+                .read()
+                .as_ref()
+                .map(|state| state.shard_id);
+            (resharding_filter, reshard_shard_id)
+        };
+
+        // Create filtered request, which has resharding filter applied
+        // Should be used on all shards, except the new resharding shard
+        let mut filtered_request = request.clone();
+        if let Some(resharding_filter) = resharding_filter {
+            for search in &mut filtered_request.searches {
                 match &mut search.filter {
                     Some(filter) => {
                         *filter = filter.merge(&resharding_filter);
@@ -143,8 +160,7 @@ impl Collection {
                 }
             }
         }
-
-        let request = Arc::new(request);
+        let filtered_request = Arc::new(filtered_request);
 
         let instant = Instant::now();
 
@@ -153,10 +169,17 @@ impl Collection {
             let shard_holder = self.shards_holder.read().await;
             let target_shards = shard_holder.select_shards(shard_selection)?;
             let all_searches = target_shards.iter().map(|(shard, shard_key)| {
+                // Take the filtered request, or the original request for the resharding shard
+                let request = if Some(shard.shard_id) == reshard_shard_id {
+                    Arc::new(request.clone())
+                } else {
+                    filtered_request.clone()
+                };
+
                 let shard_key = shard_key.cloned();
                 shard
                     .core_search(
-                        Arc::clone(&request),
+                        request,
                         read_consistency,
                         shard_selection.is_shard_id(),
                         timeout,
@@ -179,7 +202,7 @@ impl Collection {
         let result = self
             .merge_from_shards(
                 all_searches_res,
-                Arc::clone(&request),
+                Arc::clone(&filtered_request),
                 !shard_selection.is_shard_id(),
             )
             .await;
@@ -198,6 +221,7 @@ impl Collection {
         with_vector: WithVector,
         read_consistency: Option<ReadConsistency>,
         shard_selection: &ShardSelectorInternal,
+        timeout: Option<Duration>,
     ) -> CollectionResult<Vec<ScoredPoint>> {
         // short-circuit if not needed
         if let (&Some(WithPayloadInterface::Bool(false)), &WithVector::Bool(false)) =
@@ -219,7 +243,7 @@ impl Collection {
             with_vector,
         };
         let retrieved_records = self
-            .retrieve(retrieve_request, read_consistency, shard_selection)
+            .retrieve(retrieve_request, read_consistency, shard_selection, timeout)
             .await?;
         let mut records_map: HashMap<ExtendedPointId, Record> = retrieved_records
             .into_iter()

@@ -16,8 +16,11 @@ pub struct KeywordIndexParams {
     // Required for OpenAPI schema without anonymous types, versus #[serde(tag = "type")]
     pub r#type: KeywordIndexType,
 
+    /// If true - used for tenant optimization. Default: false.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub is_tenant: Option<bool>,
+
     /// If true, store the index on disk. Default: false.
-    #[cfg(any())]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub on_disk: Option<bool>,
 }
@@ -43,9 +46,12 @@ pub struct IntegerIndexParams {
     /// If true - support ranges filters.
     pub range: bool,
 
+    /// If true - use this key to organize storage of the collection data.
+    /// This option assumes that this key will be used in majority of filtered requests.
+    pub is_principal: Option<bool>,
+
     /// If true, store the index on disk. Default: false.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[cfg(any())]
     pub on_disk: Option<bool>,
 }
 
@@ -55,8 +61,34 @@ impl Default for IntegerIndexParams {
             r#type: Default::default(),
             lookup: true,
             range: true,
+            is_principal: None,
+            on_disk: None,
         }
     }
+}
+
+// UUID
+
+#[derive(Default, Debug, Deserialize, Serialize, JsonSchema, Clone, Copy, PartialEq, Hash, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum UuidIndexType {
+    #[default]
+    Uuid,
+}
+
+#[derive(Default, Debug, Deserialize, Serialize, JsonSchema, Clone, PartialEq, Hash, Eq)]
+#[serde(rename_all = "snake_case")]
+pub struct UuidIndexParams {
+    // Required for OpenAPI schema without anonymous types, versus #[serde(tag = "type")]
+    pub r#type: UuidIndexType,
+
+    /// If true - used for tenant optimization.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub is_tenant: Option<bool>,
+
+    /// If true, store the index on disk. Default: false.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub on_disk: Option<bool>,
 }
 
 // Float
@@ -74,9 +106,12 @@ pub struct FloatIndexParams {
     // Required for OpenAPI schema without anonymous types, versus #[serde(tag = "type")]
     pub r#type: FloatIndexType,
 
+    /// If true - use this key to organize storage of the collection data.
+    /// This option assumes that this key will be used in majority of filtered requests.
+    pub is_principal: Option<bool>,
+
     /// If true, store the index on disk. Default: false.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[cfg(any())]
     pub on_disk: Option<bool>,
 }
 
@@ -176,8 +211,11 @@ pub struct DatetimeIndexParams {
     // Required for OpenAPI schema without anonymous types, versus #[serde(tag = "type")]
     pub r#type: DatetimeIndexType,
 
+    /// If true - use this key to organize storage of the collection data.
+    /// This option assumes that this key will be used in majority of filtered requests.
+    pub is_principal: Option<bool>,
+
     /// If true, store the index on disk. Default: false.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[cfg(any())]
     pub on_disk: Option<bool>,
 }

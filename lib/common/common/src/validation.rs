@@ -4,6 +4,11 @@ use serde::Serialize;
 use validator::{Validate, ValidationError, ValidationErrors};
 
 // Multivector should be small enough to fit the chunk of vector storage
+
+#[cfg(debug_assertions)]
+pub const MAX_MULTIVECTOR_FLATTENED_LEN: usize = 32 * 1024;
+
+#[cfg(not(debug_assertions))]
 pub const MAX_MULTIVECTOR_FLATTENED_LEN: usize = 1024 * 1024;
 
 #[allow(clippy::manual_try_fold)] // `try_fold` can't be used because it shortcuts on Err
@@ -110,7 +115,7 @@ pub fn validate_shard_different_peers(
         error.add_param(Cow::from("other_value"), &from_peer_id.to_string());
         error.add_param(
             Cow::from("message"),
-            &format!("cannot transfer shard to itself, \"to_peer_id\" must be different than {} in \"from_peer_id\"", from_peer_id),
+            &format!("cannot transfer shard to itself, \"to_peer_id\" must be different than {from_peer_id} in \"from_peer_id\""),
         );
         error
     });
