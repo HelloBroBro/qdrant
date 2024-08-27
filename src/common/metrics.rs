@@ -25,6 +25,7 @@ const REST_ENDPOINT_WHITELIST: &[&str] = &[
     "/collections/{name}/points/delete",
     "/collections/{name}/points/discover",
     "/collections/{name}/points/discover/batch",
+    "/collections/{name}/points/facet",
     "/collections/{name}/points/payload",
     "/collections/{name}/points/payload/clear",
     "/collections/{name}/points/payload/delete",
@@ -38,6 +39,8 @@ const REST_ENDPOINT_WHITELIST: &[&str] = &[
     "/collections/{name}/points/search",
     "/collections/{name}/points/search/batch",
     "/collections/{name}/points/search/groups",
+    "/collections/{name}/points/search/matrix/offsets",
+    "/collections/{name}/points/search/matrix/pairs",
     "/collections/{name}/points/vectors",
     "/collections/{name}/points/vectors/delete",
 ];
@@ -54,6 +57,7 @@ const GRPC_ENDPOINT_WHITELIST: &[&str] = &[
     "/qdrant.Points/DeletePayload",
     "/qdrant.Points/Discover",
     "/qdrant.Points/DiscoverBatch",
+    "/qdrant.Points/Facet",
     "/qdrant.Points/Get",
     "/qdrant.Points/OverwritePayload",
     "/qdrant.Points/Query",
@@ -166,6 +170,7 @@ impl MetricsProvider for ClusterTelemetry {
             enabled,
             status,
             config: _,
+            peers: _,
         } = self;
 
         metrics.push(metric_family(

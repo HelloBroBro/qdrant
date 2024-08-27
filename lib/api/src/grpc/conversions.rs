@@ -19,7 +19,7 @@ use uuid::Uuid;
 use super::qdrant::raw_query::RawContextPair;
 use super::qdrant::{
     raw_query, start_from, BinaryQuantization, BoolIndexParams, CompressionRatio,
-    DatetimeIndexParams, DatetimeRange, Direction, FacetValue, FacetValueHit, FieldType,
+    DatetimeIndexParams, DatetimeRange, Direction, FacetHit, FacetValue, FieldType,
     FloatIndexParams, GeoIndexParams, GeoLineString, GroupId, KeywordIndexParams, LookupLocation,
     MultiVectorComparator, MultiVectorConfig, OrderBy, OrderValue, Range, RawVector,
     RecommendStrategy, SearchPointGroups, SearchPoints, ShardKeySelector, SparseIndices, StartFrom,
@@ -1472,7 +1472,9 @@ impl TryFrom<GeoPolygon> for segment::types::GeoPolygon {
                 exterior: e.into(),
                 interiors: Some(interiors.into_iter().map(Into::into).collect()),
             }),
-            _ => Err(Status::invalid_argument("Malformed GeoPolygon type")),
+            _ => Err(Status::invalid_argument(
+                "Malformed GeoPolygon type - field `exterior` is required",
+            )),
         }
     }
 }
@@ -1618,7 +1620,7 @@ impl From<segment::types::Match> for Match {
     fn from(value: segment::types::Match) -> Self {
         let match_value = match value {
             segment::types::Match::Value(value) => match value.value {
-                segment::types::ValueVariants::Keyword(kw) => MatchValue::Keyword(kw),
+                segment::types::ValueVariants::String(kw) => MatchValue::Keyword(kw),
                 segment::types::ValueVariants::Integer(int) => MatchValue::Integer(int),
                 segment::types::ValueVariants::Bool(flag) => MatchValue::Boolean(flag),
             },
@@ -1626,7 +1628,7 @@ impl From<segment::types::Match> for Match {
                 MatchValue::Text(text)
             }
             segment::types::Match::Any(any) => match any.any {
-                segment::types::AnyVariants::Keywords(strings) => {
+                segment::types::AnyVariants::Strings(strings) => {
                     let strings = strings.into_iter().collect();
                     MatchValue::Keywords(RepeatedStrings { strings })
                 }
@@ -1636,7 +1638,7 @@ impl From<segment::types::Match> for Match {
                 }
             },
             segment::types::Match::Except(except) => match except.except {
-                segment::types::AnyVariants::Keywords(strings) => {
+                segment::types::AnyVariants::Strings(strings) => {
                     let strings = strings.into_iter().collect();
                     MatchValue::ExceptKeywords(RepeatedStrings { strings })
                 }
@@ -2234,13 +2236,13 @@ impl From<LookupLocation> for rest::LookupLocation {
     }
 }
 
-impl TryFrom<FacetValueHit> for segment_facets::FacetValueHit {
+impl TryFrom<FacetHit> for segment_facets::FacetValueHit {
     type Error = Status;
 
-    fn try_from(hit: FacetValueHit) -> Result<Self, Self::Error> {
+    fn try_from(hit: FacetHit) -> Result<Self, Self::Error> {
         let value = hit
             .value
-            .ok_or_else(|| Status::internal("expected FacetValueHit to have a value"))?;
+            .ok_or_else(|| Status::internal("expected FacetHit to have a value"))?;
 
         Ok(Self {
             value: segment_facets::FacetValue::try_from(value)?,
@@ -2249,7 +2251,7 @@ impl TryFrom<FacetValueHit> for segment_facets::FacetValueHit {
     }
 }
 
-impl From<segment_facets::FacetValueHit> for FacetValueHit {
+impl From<segment_facets::FacetValueHit> for FacetHit {
     fn from(hit: segment_facets::FacetValueHit) -> Self {
         Self {
             value: Some(hit.value.into()),

@@ -1,5 +1,5 @@
 use std::cmp;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
@@ -8,15 +8,14 @@ use bitvec::prelude::BitVec;
 use common::types::{PointOffsetType, TelemetryDetail};
 use parking_lot::{RwLock, RwLockUpgradableReadGuard};
 use segment::common::operation_error::{OperationResult, SegmentFailedState};
-use segment::data_types::facets::{aggregate_facet_hits, FacetHit, FacetRequest, FacetValueHit};
+use segment::data_types::facets::{FacetParams, FacetValue};
 use segment::data_types::named_vectors::NamedVectors;
 use segment::data_types::order_by::OrderValue;
 use segment::data_types::query_context::{QueryContext, SegmentQueryContext};
 use segment::data_types::vectors::{QueryVector, Vector};
 use segment::entry::entry_point::SegmentEntry;
-use segment::index::field_index::CardinalityEstimation;
+use segment::index::field_index::{CardinalityEstimation, FieldIndex};
 use segment::json_path::JsonPath;
-use segment::spaces::tools::peek_top_largest_iterable;
 use segment::telemetry::SegmentTelemetry;
 use segment::types::{
     Condition, Filter, Payload, PayloadFieldSchema, PayloadKeyType, PayloadKeyTypeRef, PointIdType,
@@ -713,13 +712,35 @@ impl SegmentEntry for ProxySegment {
         read_points
     }
 
+    fn unique_values(
+        &self,
+        key: &JsonPath,
+        filter: Option<&Filter>,
+        is_stopped: &AtomicBool,
+    ) -> OperationResult<BTreeSet<FacetValue>> {
+        let mut values = self
+            .wrapped_segment
+            .get()
+            .read()
+            .unique_values(key, filter, is_stopped)?;
+
+        values.extend(
+            self.write_segment
+                .get()
+                .read()
+                .unique_values(key, filter, is_stopped)?,
+        );
+
+        Ok(values)
+    }
+
     fn facet(
         &self,
-        request: &FacetRequest,
+        request: &FacetParams,
         is_stopped: &AtomicBool,
-    ) -> OperationResult<Vec<FacetValueHit>> {
+    ) -> OperationResult<HashMap<FacetValue, usize>> {
         let deleted_points = self.deleted_points.read();
-        let read_segment_hits = if deleted_points.is_empty() {
+        let mut hits = if deleted_points.is_empty() {
             self.wrapped_segment
                 .get()
                 .read()
@@ -729,23 +750,24 @@ impl SegmentEntry for ProxySegment {
                 request.filter.as_ref(),
                 &deleted_points,
             );
-            let new_request = FacetRequest {
-                key: request.key.clone(),
-                limit: request.limit,
+            let new_request = FacetParams {
                 filter: Some(wrapped_filter),
+                ..request.clone()
             };
             self.wrapped_segment
                 .get()
                 .read()
                 .facet(&new_request, is_stopped)?
         };
+
         let write_segment_hits = self.write_segment.get().read().facet(request, is_stopped)?;
 
-        let hits_iter =
-            aggregate_facet_hits(read_segment_hits.into_iter().chain(write_segment_hits))
-                .into_iter()
-                .map(|(value, count)| FacetHit { value, count });
-        let hits = peek_top_largest_iterable(hits_iter, request.limit);
+        write_segment_hits
+            .into_iter()
+            .for_each(|(facet_value, count)| {
+                *hits.entry(facet_value).or_insert(0) += count;
+            });
+
         Ok(hits)
     }
 
@@ -934,30 +956,47 @@ impl SegmentEntry for ProxySegment {
             .delete_field_index(op_num, key)
     }
 
-    fn create_field_index(
-        &mut self,
-        op_num: u64,
+    fn build_field_index(
+        &self,
+        op_num: SeqNumberType,
         key: PayloadKeyTypeRef,
-        field_schema: Option<&PayloadFieldSchema>,
+        field_type: Option<&PayloadFieldSchema>,
+    ) -> OperationResult<Option<(PayloadFieldSchema, Vec<FieldIndex>)>> {
+        if self.version() > op_num {
+            return Ok(None);
+        }
+
+        self.write_segment
+            .get()
+            .read()
+            .build_field_index(op_num, key, field_type)
+    }
+
+    fn apply_field_index(
+        &mut self,
+        op_num: SeqNumberType,
+        key: PayloadKeyType,
+        field_schema: PayloadFieldSchema,
+        field_index: Vec<FieldIndex>,
     ) -> OperationResult<bool> {
         if self.version() > op_num {
             return Ok(false);
         }
 
-        self.write_segment
-            .get()
-            .write()
-            .create_field_index(op_num, key, field_schema)?;
-        let indexed_fields = self.write_segment.get().read().get_indexed_fields();
-
-        let Some(payload_schema) = indexed_fields.get(key) else {
+        if !self.write_segment.get().write().apply_field_index(
+            op_num,
+            key.clone(),
+            field_schema.clone(),
+            field_index,
+        )? {
             return Ok(false);
         };
 
+        // Index was updated: mark as added and deleted
         self.created_indexes
             .write()
-            .insert(key.to_owned(), payload_schema.to_owned());
-        self.deleted_indexes.write().remove(key);
+            .insert(key.clone(), field_schema);
+        self.deleted_indexes.write().remove(&key);
 
         Ok(true)
     }

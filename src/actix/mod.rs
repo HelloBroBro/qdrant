@@ -17,6 +17,7 @@ use actix_multipart::form::MultipartFormConfig;
 use actix_web::middleware::{Compress, Condition, Logger};
 use actix_web::{error, get, web, App, HttpRequest, HttpResponse, HttpServer, Responder};
 use actix_web_extras::middleware::Condition as ConditionEx;
+use api::facet_api::config_facet_api;
 use collection::operations::validation;
 use storage::dispatcher::Dispatcher;
 use storage::rbac::Access;
@@ -27,6 +28,7 @@ use crate::actix::api::count_api::count_points;
 use crate::actix::api::debug_api::config_debugger_api;
 use crate::actix::api::discovery_api::config_discovery_api;
 use crate::actix::api::issues_api::config_issues_api;
+use crate::actix::api::local_shard_api::config_local_shard_api;
 use crate::actix::api::query_api::config_query_api;
 use crate::actix::api::recommend_api::config_recommend_api;
 use crate::actix::api::retrieve_api::{get_point, get_points, scroll_points};
@@ -145,9 +147,11 @@ pub fn init(
                 .configure(config_recommend_api)
                 .configure(config_discovery_api)
                 .configure(config_query_api)
+                .configure(config_facet_api)
                 .configure(config_shards_api)
                 .configure(config_issues_api)
                 .configure(config_debugger_api)
+                .configure(config_local_shard_api)
                 // Ordering of services is important for correct path pattern matching
                 // See: <https://github.com/qdrant/qdrant/issues/3543>
                 .service(scroll_points)

@@ -32,7 +32,7 @@ pprof = { workspace = true }
 parking_lot = { workspace = true }
 
 rand = { workspace = true }
-thiserror = "1.0"
+thiserror = { workspace = true }
 serde = { workspace = true }
 serde_cbor = { workspace = true }
 serde_json = { workspace = true }
@@ -42,7 +42,7 @@ wal = { workspace = true }
 ordered-float = "4.2"
 hashring = "0.3.6"
 tinyvec = { version = "1.8.0", features = ["alloc"] }
-bitvec = "1.0.1"
+bitvec = { workspace = true }
 lazy_static = "1.5.0"
 smallvec = "1.13.2"
 
@@ -59,8 +59,8 @@ tonic = { workspace = true }
 uuid = { workspace = true }
 url = { version = "2", features = ["serde"] }
 validator = { workspace = true }
-actix-web-validator = "5.0.1"
-actix-web = {version = "4.8.0"}
+actix-web-validator = "6.0.0"
+actix-web = { version = "4.9.0" }
 actix-files = "0.6.6"
 
 common = { path = "../common/common" }
@@ -80,17 +80,17 @@ fs_extra = "1.3.0"
 semver = { workspace = true }
 tempfile = { workspace = true }
 sha2 = { workspace = true }
-bytes = "1.6.1"
+bytes = "1.7.1"
 fnv = { workspace = true }
 indexmap = { workspace = true }
 ringbuffer = "0.15.0"
 strum = { workspace = true }
 
 tracing = { workspace = true, optional = true }
-fs4 = "0.8.4"
+fs4 = "0.9.1"
 
 # AWS S3 support
-object_store = { version = "0.10.2", features = ["aws"] }
+object_store = { version = "0.11.0", features = ["aws"] }
 
 
 [[bench]]

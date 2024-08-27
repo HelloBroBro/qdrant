@@ -2,7 +2,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use segment::data_types::facets::{FacetRequest, FacetResponse};
+use segment::data_types::facets::{FacetParams, FacetResponse};
 use segment::data_types::order_by::OrderBy;
 use segment::types::{
     ExtendedPointId, Filter, ScoredPoint, WithPayload, WithPayloadInterface, WithVector,
@@ -241,13 +241,17 @@ impl ShardOperation for LocalShard {
 
     async fn facet(
         &self,
-        request: Arc<FacetRequest>,
+        request: Arc<FacetParams>,
         search_runtime_handle: &Handle,
         timeout: Option<Duration>,
     ) -> CollectionResult<FacetResponse> {
-        let hits = self
-            .do_facet(request, search_runtime_handle, timeout)
-            .await?;
+        let hits = if request.exact {
+            self.exact_facet(request, search_runtime_handle, timeout)
+                .await?
+        } else {
+            self.approx_facet(request, search_runtime_handle, timeout)
+                .await?
+        };
         Ok(FacetResponse { hits })
     }
 }

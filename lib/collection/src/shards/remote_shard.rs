@@ -24,7 +24,7 @@ use parking_lot::Mutex;
 use segment::common::operation_time_statistics::{
     OperationDurationsAggregator, ScopeDurationMeasurer,
 };
-use segment::data_types::facets::{FacetRequest, FacetResponse, FacetValueHit};
+use segment::data_types::facets::{FacetParams, FacetResponse, FacetValueHit};
 use segment::data_types::order_by::OrderBy;
 use segment::types::{
     ExtendedPointId, Filter, ScoredPoint, WithPayload, WithPayloadInterface, WithVector,
@@ -924,14 +924,19 @@ impl ShardOperation for RemoteShard {
 
     async fn facet(
         &self,
-        request: Arc<FacetRequest>,
+        request: Arc<FacetParams>,
         _search_runtime_handle: &Handle,
         timeout: Option<Duration>,
     ) -> CollectionResult<FacetResponse> {
         let mut timer = ScopeDurationMeasurer::new(&self.telemetry_search_durations);
         timer.set_success(false);
 
-        let FacetRequest { key, limit, filter } = request.as_ref();
+        let FacetParams {
+            key,
+            limit,
+            filter,
+            exact,
+        } = request.as_ref();
 
         let response = self
             .with_points_client(|mut client| async move {
@@ -940,6 +945,7 @@ impl ShardOperation for RemoteShard {
                     key: key.to_string(),
                     filter: filter.clone().map(api::grpc::qdrant::Filter::from),
                     limit: *limit as u64,
+                    exact: *exact,
                     shard_id: self.id,
                     timeout: timeout.map(|t| t.as_secs()),
                 };

@@ -1,5 +1,8 @@
 use std::time::Duration;
 
+use collection::collection::distance_matrix::{
+    CollectionSearchMatrixRequest, CollectionSearchMatrixResponse,
+};
 use collection::collection::Collection;
 use collection::grouping::group_by::GroupRequest;
 use collection::grouping::GroupBy;
@@ -12,7 +15,7 @@ use collection::operations::{CollectionUpdateOperations, OperationWithClockTag};
 use collection::{discovery, recommendations};
 use futures::stream::FuturesUnordered;
 use futures::TryStreamExt as _;
-use segment::data_types::facets::{FacetRequest, FacetResponse};
+use segment::data_types::facets::{FacetParams, FacetResponse};
 use segment::types::{ScoredPoint, ShardKey};
 
 use super::TableOfContent;
@@ -332,7 +335,7 @@ impl TableOfContent {
     pub async fn facet(
         &self,
         collection_name: &str,
-        mut request: FacetRequest,
+        mut request: FacetParams,
         shard_selection: ShardSelectorInternal,
         read_consistency: Option<ReadConsistency>,
         access: Access,
@@ -344,6 +347,25 @@ impl TableOfContent {
 
         collection
             .facet(request, shard_selection, read_consistency, timeout)
+            .await
+            .map_err(StorageError::from)
+    }
+
+    pub async fn search_points_matrix(
+        &self,
+        collection_name: &str,
+        mut request: CollectionSearchMatrixRequest,
+        read_consistency: Option<ReadConsistency>,
+        shard_selection: ShardSelectorInternal,
+        access: Access,
+        timeout: Option<Duration>,
+    ) -> Result<CollectionSearchMatrixResponse, StorageError> {
+        let collection_pass = access.check_point_op(collection_name, &mut request)?;
+
+        let collection = self.get_collection(&collection_pass).await?;
+
+        collection
+            .search_points_matrix(request, shard_selection, read_consistency, timeout)
             .await
             .map_err(StorageError::from)
     }

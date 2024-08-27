@@ -5,6 +5,7 @@ use std::sync::atomic::AtomicBool;
 
 use bitvec::prelude::BitSlice;
 use common::types::PointOffsetType;
+use memory::madvise::AdviceSetting;
 
 use crate::common::operation_error::{check_process_stopped, OperationError, OperationResult};
 use crate::common::Flusher;
@@ -218,11 +219,11 @@ impl<
 
     fn update_from<'a>(
         &mut self,
-        other_ids: &'a mut impl Iterator<Item = (PointOffsetType, CowVector<'a>, bool)>,
+        other_ids: &'a mut impl Iterator<Item = (CowVector<'a>, bool)>,
         stopped: &AtomicBool,
     ) -> OperationResult<Range<PointOffsetType>> {
         let start_index = self.offsets.len() as PointOffsetType;
-        for (_, other_vector, other_deleted) in other_ids {
+        for (other_vector, other_deleted) in other_ids {
             check_process_stopped(stopped)?;
             // Do not perform preprocessing - vectors should be already processed
             let other_vector: VectorRef = other_vector.as_vec_ref();
@@ -336,8 +337,8 @@ pub fn open_appendable_memmap_multi_vector_storage_impl<T: PrimitiveVectorElemen
     let offsets_path = path.join(OFFSETS_DIR_PATH);
     let deleted_path = path.join(DELETED_DIR_PATH);
 
-    let vectors = ChunkedMmapVectors::open(&vectors_path, dim, Some(false))?;
-    let offsets = ChunkedMmapVectors::open(&offsets_path, 1, Some(false))?;
+    let vectors = ChunkedMmapVectors::open(&vectors_path, dim, Some(false), AdviceSetting::Global)?;
+    let offsets = ChunkedMmapVectors::open(&offsets_path, 1, Some(false), AdviceSetting::Global)?;
 
     let deleted: DynamicMmapFlags = DynamicMmapFlags::open(&deleted_path)?;
     let deleted_count = deleted.count_flags();

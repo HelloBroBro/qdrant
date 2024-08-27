@@ -54,6 +54,7 @@ POINT_ID = 0
 FIELD_NAME = "test_field"
 PEER_ID = 0
 SHARD_KEY = "existing_shard_key"
+FACET_KEY = "a"
 
 _cached_grpc_clients = None
 
@@ -536,6 +537,27 @@ ACTION_ACCESS = {
         True,
         "POST /collections/{collection_name}/points/query/groups",
         "qdrant.Points/QueryGroups",
+    ),
+    "search_points_matrix_offsets": EndpointAccess(
+        True,
+        True,
+        True,
+        "POST /collections/{collection_name}/points/search/matrix/offsets",
+    ),
+    "search_points_matrix_rows": EndpointAccess(
+        True,
+        True,
+        True,
+        "POST /collections/{collection_name}/points/search/matrix/rows", # TODO(distance_matrix): enable grpc endpoint
+    ),
+    "search_points_matrix_pairs": EndpointAccess(
+        True,
+        True,
+        True,
+        "POST /collections/{collection_name}/points/search/matrix/pairs" # TODO(distance_matrix): enable grpc endpoint
+    ),
+    "facet": EndpointAccess(
+        True, True, True, "POST /collections/{collection_name}/facet", "qdrant.Points/Facet"
     ),
     ### Service ###
     "root": EndpointAccess(True, True, True, "GET /", "qdrant.Qdrant/HealthCheck"),
@@ -1783,6 +1805,48 @@ def test_query_points_groups():
             "group_by": FIELD_NAME
         },
     )
+
+
+def test_search_points_matrix_offsets():
+    check_access(
+        "search_points_matrix_offsets",
+        rest_request={"sample": 10, "limit": 2},
+        path_params={"collection_name": COLL_NAME},
+        grpc_request={"collection_name": COLL_NAME, "sample": 10, "limit": 2},
+    )
+
+
+def test_search_points_matrix_rows():
+    check_access(
+        "search_points_matrix_rows",
+        rest_request={"sample": 10, "limit": 2},
+        path_params={"collection_name": COLL_NAME},
+        grpc_request={"collection_name": COLL_NAME, "sample": 10, "limit": 2},
+    )
+
+
+def test_search_points_matrix_pairs():
+    check_access(
+        "search_points_matrix_pairs",
+        rest_request={"sample": 10, "limit": 2},
+        path_params={"collection_name": COLL_NAME},
+        grpc_request={"collection_name": COLL_NAME, "sample": 10, "limit": 2},
+    )
+
+
+def test_facet():
+    check_access(
+        "facet",
+        path_params={"collection_name": COLL_NAME},
+        rest_request={
+            "key": FACET_KEY,
+        },
+        grpc_request={
+            "collection_name": COLL_NAME,
+            "key": FACET_KEY,
+        },
+    )
+
 
 def test_root():
     check_access("root")

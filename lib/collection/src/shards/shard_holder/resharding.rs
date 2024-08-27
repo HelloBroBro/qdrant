@@ -1,9 +1,8 @@
 use std::collections::HashMap;
 use std::fmt;
 use std::ops::Deref as _;
-use std::sync::Arc;
 
-use segment::types::{Condition, Filter, ShardKey};
+use segment::types::ShardKey;
 
 use super::ShardHolder;
 use crate::hash_ring::{self, HashRingRouter};
@@ -11,6 +10,7 @@ use crate::operations::cluster_ops::ReshardingDirection;
 use crate::operations::types::{CollectionError, CollectionResult};
 use crate::shards::replica_set::{ReplicaState, ShardReplicaSet};
 use crate::shards::resharding::{ReshardKey, ReshardStage, ReshardState};
+use crate::shards::shard::ShardId;
 
 impl ShardHolder {
     pub fn check_start_resharding(&mut self, resharding_key: &ReshardKey) -> CollectionResult<()> {
@@ -227,14 +227,14 @@ impl ShardHolder {
         }
 
         // - it's safe to run, if write hash ring was not committed yet
-        if state.stage < ReshardStage::WriteHashRingCommitted {
+        if state.stage < ReshardStage::ReadHashRingCommitted {
             return Ok(());
         }
 
-        // - but resharding can't be aborted, after write hash ring has been committed
+        // - but resharding can't be aborted, after read hash ring has been committed
         Err(CollectionError::bad_request(format!(
             "can't abort resharding {resharding_key}, \
-             because write hash ring has been committed already, \
+             because read hash ring has been committed already, \
              resharding must be completed",
         )))
     }
@@ -253,10 +253,10 @@ impl ShardHolder {
 
         let is_in_progress = match self.resharding_state.read().deref() {
             Some(state) if state.matches(&resharding_key) => {
-                if !force && state.stage >= ReshardStage::WriteHashRingCommitted {
+                if !force && state.stage >= ReshardStage::ReadHashRingCommitted {
                     return Err(CollectionError::bad_request(format!(
                         "can't abort resharding {resharding_key}, \
-                         because write hash ring has been committed already, \
+                         because read hash ring has been committed already, \
                          resharding must be completed",
                     )));
                 }
@@ -317,7 +317,7 @@ impl ShardHolder {
                     None => {
                         log::warn!(
                             "aborting resharding {resharding_key}, \
-                         but peer {peer_id} does not exist in {shard_id} replica set"
+                             but peer {peer_id} does not exist in {shard_id} replica set"
                         );
                     }
                 }
@@ -343,7 +343,7 @@ impl ShardHolder {
             } else {
                 log::warn!(
                     "aborting resharding {resharding_key}, \
-                 but shard holder does not contain {shard_id} replica set",
+                     but shard holder does not contain {shard_id} replica set",
                 );
             }
         }
@@ -364,37 +364,30 @@ impl ShardHolder {
         Ok(())
     }
 
-    /// A filter that excludes points migrated to a different shard, as part of resharding.
-    ///
-    /// `None` if resharding is not active or if the read hash ring is not committed yet.
-    pub fn resharding_filter(&self) -> Option<Filter> {
-        let filter = self.resharding_filter_impl()?;
-        let filter = Filter::new_must_not(Condition::CustomIdChecker(Arc::new(filter)));
-        Some(filter)
+    pub fn resharding_filter(&self) -> Option<hash_ring::HashRingFilter> {
+        let shard_id = self.resharding_state.read().as_ref()?.shard_id;
+        self.hash_ring_filter(shard_id)
     }
 
-    #[inline]
-    pub fn resharding_filter_impl(&self) -> Option<hash_ring::HashRingFilter> {
-        let state = self.resharding_state.read();
-
-        let Some(state) = state.deref() else {
-            return None;
-        };
-
-        if state.stage < ReshardStage::ReadHashRingCommitted {
+    pub fn hash_ring_filter(&self, shard_id: ShardId) -> Option<hash_ring::HashRingFilter> {
+        if !self.contains_shard(&shard_id) {
             return None;
         }
 
-        let Some(ring) = self.rings.get(&state.shard_key) else {
-            return None; // TODO(resharding): Return error?
-        };
-
-        let ring = match ring {
-            HashRingRouter::Resharding { new, .. } => new,
+        let shard_key = self.shard_id_to_key_mapping.get(&shard_id).cloned();
+        let router = self.rings.get(&shard_key).expect("hashring exists");
+        let ring = match router {
             HashRingRouter::Single(ring) => ring,
+            HashRingRouter::Resharding { old, new } => {
+                if new.len() > old.len() {
+                    new
+                } else {
+                    old
+                }
+            }
         };
 
-        Some(hash_ring::HashRingFilter::new(ring.clone(), state.shard_id))
+        Some(hash_ring::HashRingFilter::new(ring.clone(), shard_id))
     }
 }
 

@@ -382,7 +382,7 @@ pub struct SearchParams {
 
     /// Quantization params
     #[serde(default)]
-    #[validate]
+    #[validate(nested)]
     pub quantization: Option<QuantizationSearchParams>,
 
     /// If enabled, the engine will only perform search among indexed or small segments.
@@ -398,7 +398,7 @@ pub struct CollectionConfigDefaults {
     #[serde(default)]
     pub vectors: Option<VectorsConfigDefaults>,
 
-    #[validate]
+    #[validate(nested)]
     pub quantization: Option<QuantizationConfig>,
 
     #[validate(range(min = 1))]
@@ -562,7 +562,7 @@ impl ScalarQuantizationConfig {
 
 #[derive(Debug, Deserialize, Serialize, JsonSchema, Validate, Clone, PartialEq, Eq, Hash)]
 pub struct ScalarQuantization {
-    #[validate]
+    #[validate(nested)]
     pub scalar: ScalarQuantizationConfig,
 }
 
@@ -588,7 +588,7 @@ impl ProductQuantizationConfig {
 
 #[derive(Debug, Deserialize, Serialize, JsonSchema, Validate, Clone, PartialEq, Eq, Hash)]
 pub struct ProductQuantization {
-    #[validate]
+    #[validate(nested)]
     pub product: ProductQuantizationConfig,
 }
 
@@ -610,7 +610,7 @@ pub struct BinaryQuantizationConfig {
 
 #[derive(Debug, Deserialize, Serialize, JsonSchema, Validate, Clone, PartialEq, Eq, Hash)]
 pub struct BinaryQuantization {
-    #[validate]
+    #[validate(nested)]
     pub binary: BinaryQuantizationConfig,
 }
 
@@ -1253,6 +1253,13 @@ impl PayloadFieldSchema {
             PayloadFieldSchema::FieldParams(params) => params.is_on_disk(),
         }
     }
+
+    pub fn kind(&self) -> PayloadSchemaType {
+        match self {
+            PayloadFieldSchema::FieldType(t) => *t,
+            PayloadFieldSchema::FieldParams(p) => p.kind(),
+        }
+    }
 }
 
 impl From<PayloadSchemaType> for PayloadFieldSchema {
@@ -1327,7 +1334,7 @@ where
 #[derive(Debug, Deserialize, Serialize, JsonSchema, Clone, PartialEq, Eq)]
 #[serde(untagged)]
 pub enum ValueVariants {
-    Keyword(String),
+    String(String),
     Integer(IntPayloadType),
     Bool(bool),
 }
@@ -1335,7 +1342,7 @@ pub enum ValueVariants {
 impl ValueVariants {
     pub fn to_value(&self) -> Value {
         match self {
-            ValueVariants::Keyword(keyword) => Value::String(keyword.clone()),
+            ValueVariants::String(keyword) => Value::String(keyword.clone()),
             &ValueVariants::Integer(integer) => Value::Number(integer.into()),
             &ValueVariants::Bool(flag) => Value::Bool(flag),
         }
@@ -1345,7 +1352,7 @@ impl ValueVariants {
 #[derive(Debug, Deserialize, Serialize, JsonSchema, Clone, PartialEq, Eq)]
 #[serde(untagged)]
 pub enum AnyVariants {
-    Keywords(IndexSet<String, FnvBuildHasher>),
+    Strings(IndexSet<String, FnvBuildHasher>),
     Integers(IndexSet<IntPayloadType, FnvBuildHasher>),
 }
 
@@ -1451,7 +1458,7 @@ impl From<bool> for Match {
 impl From<String> for Match {
     fn from(keyword: String) -> Self {
         Self::Value(MatchValue {
-            value: ValueVariants::Keyword(keyword),
+            value: ValueVariants::String(keyword),
         })
     }
 }
@@ -1459,7 +1466,7 @@ impl From<String> for Match {
 impl From<SmolStr> for Match {
     fn from(keyword: SmolStr) -> Self {
         Self::Value(MatchValue {
-            value: ValueVariants::Keyword(keyword.into()),
+            value: ValueVariants::String(keyword.into()),
         })
     }
 }
@@ -1476,7 +1483,7 @@ impl From<Vec<String>> for Match {
     fn from(keywords: Vec<String>) -> Self {
         let keywords: IndexSet<String, FnvBuildHasher> = keywords.into_iter().collect();
         Self::Any(MatchAny {
-            any: AnyVariants::Keywords(keywords),
+            any: AnyVariants::Strings(keywords),
         })
     }
 }
@@ -1485,7 +1492,7 @@ impl From<Vec<String>> for MatchExcept {
     fn from(keywords: Vec<String>) -> Self {
         let keywords: IndexSet<String, FnvBuildHasher> = keywords.into_iter().collect();
         MatchExcept {
-            except: AnyVariants::Keywords(keywords),
+            except: AnyVariants::Strings(keywords),
         }
     }
 }
@@ -1949,13 +1956,13 @@ impl From<HashSet<PointIdType>> for HasIdCondition {
 #[derive(Debug, Deserialize, Serialize, JsonSchema, Clone, PartialEq, Validate)]
 pub struct Nested {
     pub key: PayloadKeyType,
-    #[validate]
+    #[validate(nested)]
     pub filter: Filter,
 }
 
 #[derive(Debug, Deserialize, Serialize, JsonSchema, Clone, PartialEq, Validate)]
 pub struct NestedCondition {
-    #[validate]
+    #[validate(nested)]
     pub nested: Nested,
 }
 
@@ -2238,20 +2245,20 @@ pub struct MinShould {
 #[serde(deny_unknown_fields, rename_all = "snake_case")]
 pub struct Filter {
     /// At least one of those conditions should match
-    #[validate]
+    #[validate(nested)]
     #[serde(default, with = "MaybeOneOrMany")]
     #[schemars(with = "MaybeOneOrMany<Condition>")]
     pub should: Option<Vec<Condition>>,
     /// At least minimum amount of given conditions should match
-    #[validate]
+    #[validate(nested)]
     pub min_should: Option<MinShould>,
     /// All conditions must match
-    #[validate]
+    #[validate(nested)]
     #[serde(default, with = "MaybeOneOrMany")]
     #[schemars(with = "MaybeOneOrMany<Condition>")]
     pub must: Option<Vec<Condition>>,
     /// All conditions must NOT match
-    #[validate]
+    #[validate(nested)]
     #[serde(default, with = "MaybeOneOrMany")]
     #[schemars(with = "MaybeOneOrMany<Condition>")]
     pub must_not: Option<Vec<Condition>>,
@@ -2684,7 +2691,7 @@ mod tests {
         assert_eq!(
             condition.r#match.unwrap(),
             Match::Value(MatchValue {
-                value: ValueVariants::Keyword("world".to_owned())
+                value: ValueVariants::String("world".to_owned())
             })
         );
     }
@@ -2721,7 +2728,7 @@ mod tests {
         let Match::Any(m) = c.r#match.as_ref().unwrap() else {
             panic!("Match::Any expected")
         };
-        if let AnyVariants::Keywords(kws) = &m.any {
+        if let AnyVariants::Strings(kws) = &m.any {
             assert_eq!(kws.len(), 3);
             let expect: IndexSet<_, FnvBuildHasher> = ["Bourne", "Momoa", "Statham"]
                 .into_iter()
@@ -2796,7 +2803,7 @@ mod tests {
         assert_eq!(
             condition.r#match.unwrap(),
             Match::Value(MatchValue {
-                value: ValueVariants::Keyword("world".to_owned())
+                value: ValueVariants::String("world".to_owned())
             })
         );
     }
@@ -3280,7 +3287,7 @@ mod tests {
 
         let condition2 = Condition::Field(FieldCondition::new_match(
             JsonPath::new("city"),
-            Match::new_value(ValueVariants::Keyword("Osaka".into())),
+            Match::new_value(ValueVariants::String("Osaka".into())),
         ));
         let other = Filter::new_must(condition2.clone());
 

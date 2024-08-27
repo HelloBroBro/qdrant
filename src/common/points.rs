@@ -2,6 +2,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use api::rest::{SearchGroupsRequestInternal, ShardKeySelector};
+use collection::collection::distance_matrix::{
+    CollectionSearchMatrixRequest, CollectionSearchMatrixResponse,
+};
 use collection::common::batching::batch_requests;
 use collection::grouping::group_by::GroupRequest;
 use collection::operations::consistency_params::ReadConsistency;
@@ -50,49 +53,49 @@ pub struct CreateFieldIndex {
 
 #[derive(Deserialize, Serialize, JsonSchema, Validate)]
 pub struct UpsertOperation {
-    #[validate]
+    #[validate(nested)]
     upsert: PointInsertOperations,
 }
 
 #[derive(Deserialize, Serialize, JsonSchema, Validate)]
 pub struct DeleteOperation {
-    #[validate]
+    #[validate(nested)]
     delete: PointsSelector,
 }
 
 #[derive(Deserialize, Serialize, JsonSchema, Validate)]
 pub struct SetPayloadOperation {
-    #[validate]
+    #[validate(nested)]
     set_payload: SetPayload,
 }
 
 #[derive(Deserialize, Serialize, JsonSchema, Validate)]
 pub struct OverwritePayloadOperation {
-    #[validate]
+    #[validate(nested)]
     overwrite_payload: SetPayload,
 }
 
 #[derive(Deserialize, Serialize, JsonSchema, Validate)]
 pub struct DeletePayloadOperation {
-    #[validate]
+    #[validate(nested)]
     delete_payload: DeletePayload,
 }
 
 #[derive(Deserialize, Serialize, JsonSchema, Validate)]
 pub struct ClearPayloadOperation {
-    #[validate]
+    #[validate(nested)]
     clear_payload: PointsSelector,
 }
 
 #[derive(Deserialize, Serialize, JsonSchema, Validate)]
 pub struct UpdateVectorsOperation {
-    #[validate]
+    #[validate(nested)]
     update_vectors: UpdateVectors,
 }
 
 #[derive(Deserialize, Serialize, JsonSchema, Validate)]
 pub struct DeleteVectorsOperation {
-    #[validate]
+    #[validate(nested)]
     delete_vectors: DeleteVectors,
 }
 
@@ -1013,6 +1016,26 @@ pub async fn do_query_point_groups(
     toc.group(
         collection_name,
         GroupRequest::from(request),
+        read_consistency,
+        shard_selection,
+        access,
+        timeout,
+    )
+    .await
+}
+
+pub async fn do_search_points_matrix(
+    toc: &TableOfContent,
+    collection_name: &str,
+    request: CollectionSearchMatrixRequest,
+    read_consistency: Option<ReadConsistency>,
+    shard_selection: ShardSelectorInternal,
+    access: Access,
+    timeout: Option<Duration>,
+) -> Result<CollectionSearchMatrixResponse, StorageError> {
+    toc.search_points_matrix(
+        collection_name,
+        request,
         read_consistency,
         shard_selection,
         access,

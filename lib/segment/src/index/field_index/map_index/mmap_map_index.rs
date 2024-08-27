@@ -8,13 +8,15 @@ use ahash::HashMap;
 use common::mmap_hashmap::{Key, MmapHashMap};
 use common::types::PointOffsetType;
 use io::file_operations::{atomic_save_json, read_json};
+use itertools::Itertools;
 use memmap2::MmapMut;
+use memory::madvise::AdviceSetting;
 use memory::mmap_ops::{self, create_and_ensure_length};
+use memory::mmap_type::MmapBitSlice;
 use serde::{Deserialize, Serialize};
 
 use super::{IdRefIter, MapIndexKey};
 use crate::common::mmap_bitslice_buffered_update_wrapper::MmapBitSliceBufferedUpdateWrapper;
-use crate::common::mmap_type::MmapBitSlice;
 use crate::common::operation_error::OperationResult;
 use crate::common::Flusher;
 use crate::index::field_index::mmap_point_to_values::MmapPointToValues;
@@ -48,7 +50,7 @@ impl<N: MapIndexKey + Key + ?Sized> MmapMapIndex<N> {
         let hashmap = MmapHashMap::open(&hashmap_path)?;
         let point_to_values = MmapPointToValues::open(path)?;
 
-        let deleted = mmap_ops::open_write_mmap(&deleted_path)?;
+        let deleted = mmap_ops::open_write_mmap(&deleted_path, AdviceSetting::Global)?;
         let deleted = MmapBitSlice::from(deleted, 0);
         let deleted_count = deleted.count_ones();
 
@@ -218,7 +220,14 @@ impl<N: MapIndexKey + Key + ?Sized> MmapMapIndex<N> {
     }
 
     pub fn iter_counts_per_value(&self) -> impl Iterator<Item = (&N, usize)> + '_ {
-        self.value_to_points.iter().map(|(k, v)| (k, v.len()))
+        self.value_to_points.iter().map(|(k, v)| {
+            let count = v
+                .iter()
+                .filter(|idx| !self.deleted.get(**idx as usize).unwrap_or(true))
+                .unique()
+                .count();
+            (k, count)
+        })
     }
 
     pub fn iter_values_map(&self) -> impl Iterator<Item = (&N, IdRefIter<'_>)> + '_ {

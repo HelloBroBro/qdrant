@@ -41,7 +41,7 @@ pub struct PointStruct {
     pub id: PointIdType,
     /// Vectors
     #[serde(alias = "vectors")]
-    #[validate]
+    #[validate(nested)]
     pub vector: VectorStruct,
     /// Payload values (optional)
     pub payload: Option<Payload>,
@@ -134,7 +134,7 @@ pub struct PointSyncOperation {
 
 #[derive(Debug, Deserialize, Serialize, Clone, Validate, JsonSchema)]
 pub struct PointsBatch {
-    #[validate]
+    #[validate(nested)]
     pub batch: Batch,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub shard_key: Option<ShardKeySelector>,
@@ -142,7 +142,7 @@ pub struct PointsBatch {
 
 #[derive(Debug, Deserialize, Serialize, Clone, JsonSchema, Validate)]
 pub struct PointsList {
-    #[validate]
+    #[validate(nested)]
     pub points: Vec<PointStruct>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub shard_key: Option<ShardKeySelector>,
@@ -269,6 +269,11 @@ impl Validate for Batch {
                         )));
                     }
                 }
+            }
+            BatchVectorStruct::Document(_) => {
+                return Err(create_error(
+                    "Document inference is not implemented, please use vectors instead".to_string(),
+                ));
             }
         }
         if let Some(payload_vector) = &batch.payloads {
@@ -440,6 +445,12 @@ impl SplitByShard for Batch {
                         }
                     }
                 }
+                BatchVectorStruct::Document(_) => {
+                    // If this is reached, it means validation failed
+                    unreachable!(
+                        "Document inference is not implemented, please use vectors instead"
+                    )
+                }
             }
         } else {
             match vectors {
@@ -505,6 +516,12 @@ impl SplitByShard for Batch {
                         }
                     }
                 }
+                BatchVectorStruct::Document(_) => {
+                    // If this is reached, it means validation failed
+                    unreachable!(
+                        "Document inference is not implemented, please use vectors instead"
+                    )
+                }
             }
         }
 
@@ -567,6 +584,12 @@ impl PointStruct {
                 for (name, vector) in vectors {
                     named_vectors.insert(name.clone(), Vector::from(vector.clone()));
                 }
+            }
+            VectorStruct::Document(_) => {
+                debug_assert!(
+                    false,
+                    "Document inference is not implemented, please use vectors instead"
+                );
             }
         }
         named_vectors

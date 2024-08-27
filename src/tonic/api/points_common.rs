@@ -8,13 +8,13 @@ use api::grpc::qdrant::{
     points_update_operation, BatchResult, ClearPayloadPoints, CoreSearchPoints, CountPoints,
     CountResponse, CreateFieldIndexCollection, DeleteFieldIndexCollection, DeletePayloadPoints,
     DeletePointVectors, DeletePoints, DiscoverBatchResponse, DiscoverPoints, DiscoverResponse,
-    FieldType, GetPoints, GetResponse, PayloadIndexParams, PointsOperationResponseInternal,
-    PointsSelector, QueryBatchResponse, QueryGroupsResponse, QueryPointGroups, QueryPoints,
-    QueryResponse, ReadConsistency as ReadConsistencyGrpc, RecommendBatchResponse,
-    RecommendGroupsResponse, RecommendPointGroups, RecommendPoints, RecommendResponse,
-    ScrollPoints, ScrollResponse, SearchBatchResponse, SearchGroupsResponse, SearchPointGroups,
-    SearchPoints, SearchResponse, SetPayloadPoints, SyncPoints, UpdateBatchPoints,
-    UpdateBatchResponse, UpdatePointVectors, UpsertPoints,
+    FacetCounts, FacetResponse, FieldType, GetPoints, GetResponse, PayloadIndexParams,
+    PointsOperationResponseInternal, PointsSelector, QueryBatchResponse, QueryGroupsResponse,
+    QueryPointGroups, QueryPoints, QueryResponse, ReadConsistency as ReadConsistencyGrpc,
+    RecommendBatchResponse, RecommendGroupsResponse, RecommendPointGroups, RecommendPoints,
+    RecommendResponse, ScrollPoints, ScrollResponse, SearchBatchResponse, SearchGroupsResponse,
+    SearchPointGroups, SearchPoints, SearchResponse, SetPayloadPoints, SyncPoints,
+    UpdateBatchPoints, UpdateBatchResponse, UpdatePointVectors, UpsertPoints,
 };
 use api::rest::{OrderByInterface, ShardKeySelector};
 use collection::operations::consistency_params::ReadConsistency;
@@ -38,6 +38,7 @@ use collection::operations::vector_ops::{DeleteVectors, PointVectors, UpdateVect
 use collection::operations::{ClockTag, CollectionUpdateOperations, OperationWithClockTag};
 use collection::shards::shard::ShardId;
 use itertools::Itertools;
+use segment::data_types::facets::FacetParams;
 use segment::data_types::order_by::OrderBy;
 use segment::data_types::vectors::VectorStructInternal;
 use segment::types::{
@@ -746,59 +747,67 @@ fn convert_field_type(
         .ok_or_else(|| Status::invalid_argument("cannot convert field_type"))?;
 
     let field_schema = match (field_type_parsed, field_index_params) {
-        // Parameterized Datetime type
         (
-            Some(FieldType::Datetime),
+            Some(field_type),
             Some(PayloadIndexParams {
-                index_params: Some(IndexParams::DatetimeIndexParams(datetime_index_params)),
+                index_params: Some(index_params),
             }),
-        ) => Some(PayloadFieldSchema::FieldParams(
-            PayloadSchemaParams::Datetime(datetime_index_params.try_into()?),
-        )),
-        // Parameterized Uuid type
-        (
-            Some(FieldType::Uuid),
-            Some(PayloadIndexParams {
-                index_params: Some(IndexParams::UuidIndexParams(uuid_index_params)),
-            }),
-        ) => Some(PayloadFieldSchema::FieldParams(PayloadSchemaParams::Uuid(
-            uuid_index_params.try_into()?,
-        ))),
-        // Parameterized keyword type
-        (
-            Some(FieldType::Keyword),
-            Some(PayloadIndexParams {
-                index_params: Some(IndexParams::KeywordIndexParams(keyword_index_params)),
-            }),
-        ) => Some(PayloadFieldSchema::FieldParams(
-            PayloadSchemaParams::Keyword(keyword_index_params.try_into()?),
-        )), // Parameterized text type
-        (
-            Some(FieldType::Text),
-            Some(PayloadIndexParams {
-                index_params: Some(IndexParams::TextIndexParams(text_index_params)),
-            }),
-        ) => Some(PayloadFieldSchema::FieldParams(PayloadSchemaParams::Text(
-            text_index_params.try_into()?,
-        ))),
-        // Parameterized float type
-        (
-            Some(FieldType::Float),
-            Some(PayloadIndexParams {
-                index_params: Some(IndexParams::FloatIndexParams(float_params)),
-            }),
-        ) => Some(PayloadFieldSchema::FieldParams(PayloadSchemaParams::Float(
-            float_params.try_into()?,
-        ))),
-        // Parameterized integer type
-        (
-            Some(FieldType::Integer),
-            Some(PayloadIndexParams {
-                index_params: Some(IndexParams::IntegerIndexParams(integer_params)),
-            }),
-        ) => Some(PayloadFieldSchema::FieldParams(
-            PayloadSchemaParams::Integer(integer_params.try_into()?),
-        )),
+        ) => {
+            let schema_params = match index_params {
+                // Parameterized keyword type
+                IndexParams::KeywordIndexParams(keyword_index_params) => {
+                    matches!(field_type, FieldType::Keyword).then(|| {
+                        TryFrom::try_from(keyword_index_params).map(PayloadSchemaParams::Keyword)
+                    })
+                }
+                IndexParams::IntegerIndexParams(integer_index_params) => {
+                    matches!(field_type, FieldType::Integer).then(|| {
+                        TryFrom::try_from(integer_index_params).map(PayloadSchemaParams::Integer)
+                    })
+                }
+                // Parameterized float type
+                IndexParams::FloatIndexParams(float_index_params) => {
+                    matches!(field_type, FieldType::Float).then(|| {
+                        TryFrom::try_from(float_index_params).map(PayloadSchemaParams::Float)
+                    })
+                }
+                IndexParams::GeoIndexParams(geo_index_params) => {
+                    matches!(field_type, FieldType::Geo)
+                        .then(|| TryFrom::try_from(geo_index_params).map(PayloadSchemaParams::Geo))
+                }
+                // Parameterized text type
+                IndexParams::TextIndexParams(text_index_params) => {
+                    matches!(field_type, FieldType::Text).then(|| {
+                        TryFrom::try_from(text_index_params).map(PayloadSchemaParams::Text)
+                    })
+                }
+                // Parameterized bool type
+                IndexParams::BoolIndexParams(bool_index_params) => {
+                    matches!(field_type, FieldType::Bool).then(|| {
+                        TryFrom::try_from(bool_index_params).map(PayloadSchemaParams::Bool)
+                    })
+                }
+                // Parameterized Datetime type
+                IndexParams::DatetimeIndexParams(datetime_index_params) => {
+                    matches!(field_type, FieldType::Datetime).then(|| {
+                        TryFrom::try_from(datetime_index_params).map(PayloadSchemaParams::Datetime)
+                    })
+                }
+                // Parameterized Uuid type
+                IndexParams::UuidIndexParams(uuid_index_params) => {
+                    matches!(field_type, FieldType::Uuid).then(|| {
+                        TryFrom::try_from(uuid_index_params).map(PayloadSchemaParams::Uuid)
+                    })
+                }
+            }
+            .ok_or_else(|| {
+                Status::invalid_argument(format!(
+                    "field_type ({field_type:?}) and field_index_params do not match"
+                ))
+            })??;
+
+            Some(PayloadFieldSchema::FieldParams(schema_params))
+        }
         // Regular field types
         (Some(v), None | Some(PayloadIndexParams { index_params: None })) => match v {
             FieldType::Keyword => Some(PayloadSchemaType::Keyword.into()),
@@ -810,17 +819,6 @@ fn convert_field_type(
             FieldType::Datetime => Some(PayloadSchemaType::Datetime.into()),
             FieldType::Uuid => Some(PayloadSchemaType::Uuid.into()),
         },
-        // Parameterized index with mismatching types
-        (
-            Some(v),
-            Some(PayloadIndexParams {
-                index_params: Some(_),
-            }),
-        ) => {
-            return Err(Status::invalid_argument(format!(
-                "field_type ({v:?}) and field_index_params do not match"
-            )))
-        }
         (None, Some(_)) => return Err(Status::invalid_argument("field type is missing")),
         (None, None) => None,
     };
@@ -1688,6 +1686,60 @@ pub async fn query_groups(
 
     let response = QueryGroupsResponse {
         result: Some(groups_result.into()),
+        time: timing.elapsed().as_secs_f64(),
+    };
+
+    Ok(Response::new(response))
+}
+
+pub async fn facet(
+    toc: &TableOfContent,
+    facet_counts: FacetCounts,
+    access: Access,
+) -> Result<Response<FacetResponse>, Status> {
+    let FacetCounts {
+        collection_name,
+        key,
+        filter,
+        exact,
+        limit,
+        read_consistency,
+        shard_key_selector,
+        timeout,
+    } = facet_counts;
+
+    let facet_request = FacetParams {
+        key: json_path_from_proto(&key)?,
+        filter: filter.map(TryInto::try_into).transpose()?,
+        limit: limit
+            .map(usize::try_from)
+            .transpose()
+            .map_err(|_| Status::invalid_argument("could not parse limit param into usize"))?
+            .unwrap_or(FacetParams::DEFAULT_LIMIT),
+        exact: exact.unwrap_or(FacetParams::DEFAULT_EXACT),
+    };
+
+    let timeout = timeout.map(Duration::from_secs);
+    let read_consistency = ReadConsistency::try_from_optional(read_consistency)?;
+
+    let shard_selector = convert_shard_selector_for_read(None, shard_key_selector);
+
+    let timing = Instant::now();
+    let facet_response = toc
+        .facet(
+            &collection_name,
+            facet_request,
+            shard_selector,
+            read_consistency,
+            access,
+            timeout,
+        )
+        .await?;
+
+    let segment::data_types::facets::FacetResponse { hits } = facet_response;
+
+    let response = FacetResponse {
+        hits: hits.into_iter().map(From::from).collect(),
         time: timing.elapsed().as_secs_f64(),
     };
 
