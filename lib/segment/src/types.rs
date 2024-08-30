@@ -1224,6 +1224,15 @@ pub enum PayloadFieldSchema {
     FieldParams(PayloadSchemaParams),
 }
 
+impl Display for PayloadFieldSchema {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        match self {
+            PayloadFieldSchema::FieldType(t) => write!(f, "{}", t.name()),
+            PayloadFieldSchema::FieldParams(p) => write!(f, "{}", p.name()),
+        }
+    }
+}
+
 impl PayloadFieldSchema {
     pub fn expand(&self) -> Cow<'_, PayloadSchemaParams> {
         match self {
@@ -1612,17 +1621,21 @@ pub struct ValuesCount {
 }
 
 impl ValuesCount {
-    pub fn check_count(&self, value: &Value) -> bool {
+    pub fn check_count(&self, count: usize) -> bool {
+        self.lt.map_or(true, |x| count < x)
+            && self.gt.map_or(true, |x| count > x)
+            && self.lte.map_or(true, |x| count <= x)
+            && self.gte.map_or(true, |x| count >= x)
+    }
+
+    pub fn check_count_from(&self, value: &Value) -> bool {
         let count = match value {
             Value::Null => 0,
             Value::Array(array) => array.len(),
             _ => 1,
         };
 
-        self.lt.map_or(true, |x| count < x)
-            && self.gt.map_or(true, |x| count > x)
-            && self.lte.map_or(true, |x| count <= x)
-            && self.gte.map_or(true, |x| count >= x)
+        self.check_count(count)
     }
 }
 
@@ -2352,6 +2365,15 @@ impl Filter {
             (None, Some(other)) => Some(other),
             (Some(this), Some(other)) => Some(this.merge_owned(other)),
         }
+    }
+
+    pub fn iter_conditions(&self) -> impl Iterator<Item = &Condition> {
+        self.must
+            .iter()
+            .flatten()
+            .chain(self.must_not.iter().flatten())
+            .chain(self.should.iter().flatten())
+            .chain(self.min_should.iter().flat_map(|i| &i.conditions))
     }
 }
 
