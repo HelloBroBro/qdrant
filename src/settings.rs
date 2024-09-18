@@ -34,6 +34,9 @@ pub struct ServiceConfig {
     #[serde(default)]
     pub jwt_rbac: Option<bool>,
 
+    #[serde(default)]
+    pub hide_jwt_dashboard: Option<bool>,
+
     /// Directory where static files are served from.
     /// For example, the Web-UI should be placed here.
     #[serde(default)]
@@ -219,6 +222,27 @@ impl Settings {
 
     #[allow(dead_code)]
     pub fn validate_and_warn(&self) {
+        //
+        // JWT RBAC
+        //
+        // Using HMAC-SHA256, recommended secret size is 32 bytes
+        const JWT_RECOMMENDED_SECRET_LENGTH: usize = 256 / 8;
+
+        // Log if JWT RBAC is enabled but no API key is set
+        if self.service.jwt_rbac.unwrap_or_default() {
+            if self.service.api_key.clone().unwrap_or_default().is_empty() {
+                log::warn!("JWT RBAC configured but no API key set, JWT RBAC is not enabled")
+            // Log if JWT RAC is enabled, API key is set but smaller than recommended size for JWT secret
+            } else if self.service.api_key.clone().unwrap_or_default().len()
+                < JWT_RECOMMENDED_SECRET_LENGTH
+            {
+                log::warn!(
+                "It is highly recommended to use an API key of {} bytes when JWT RBAC is enabled",
+                JWT_RECOMMENDED_SECRET_LENGTH
+            )
+            }
+        }
+
         // Print any load error messages we had
         self.load_errors.iter().for_each(LogMsg::log);
 

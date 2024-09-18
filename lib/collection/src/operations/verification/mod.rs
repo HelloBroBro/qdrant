@@ -1,12 +1,31 @@
+mod count;
+mod discovery;
+mod facet;
+mod local_shard;
+mod recommend;
 mod search;
+mod update;
 
 use std::fmt::Display;
 
-use segment::types::Filter;
+use segment::types::{Filter, SearchParams};
 
 use super::config_diff::StrictModeConfig;
 use super::types::CollectionError;
 use crate::collection::Collection;
+
+// Creates a new `VerificationPass` for successful verifications.
+// Don't use this, unless you know what you're doing!
+pub fn new_pass() -> VerificationPass {
+    VerificationPass { inner: () }
+}
+
+/// A pass, created on successful verification.
+pub struct VerificationPass {
+    // Private field, so we can't instantiate it from somewhere else.
+    #[allow(dead_code)]
+    inner: (),
+}
 
 /// Trait to verify strict mode for requests.
 /// This trait ignores the `enabled` parameter in `StrictModeConfig`.
@@ -32,9 +51,26 @@ pub trait StrictModeVerification {
     fn indexed_filter_read(&self) -> Option<&Filter>;
 
     /// Verifies that all keys in the given filter have an index available. Only implement this
-    /// if the filter is used for FILTERED-updates like delete by payload.
+    /// if the filter is used for filtered-UPDATES like delete by payload.
     /// For read only filters implement `request_indexed_filter_read`!
     fn indexed_filter_write(&self) -> Option<&Filter>;
+
+    fn request_exact(&self) -> Option<bool>;
+
+    fn request_search_params(&self) -> Option<&SearchParams>;
+
+    /// Checks the 'exact' parameter.
+    fn check_request_exact(
+        &self,
+        strict_mode_config: &StrictModeConfig,
+    ) -> Result<(), CollectionError> {
+        check_bool_opt(
+            self.request_exact(),
+            strict_mode_config.search_allow_exact,
+            "Exact search",
+            "exact",
+        )
+    }
 
     /// Checks the request limit.
     fn check_request_query_limit(
@@ -46,6 +82,18 @@ pub trait StrictModeVerification {
             strict_mode_config.max_query_limit,
             "limit",
         )
+    }
+
+    /// Checks search parameters.
+    fn check_search_params(
+        &self,
+        collection: &Collection,
+        strict_mode_config: &StrictModeConfig,
+    ) -> Result<(), CollectionError> {
+        if let Some(search_params) = self.request_search_params() {
+            search_params.check_strict_mode(collection, strict_mode_config)?;
+        }
+        Ok(())
     }
 
     /// Checks the request timeout.
@@ -107,17 +155,10 @@ pub trait StrictModeVerification {
         self.check_custom(collection, strict_mode_config)?;
         self.check_request_query_limit(strict_mode_config)?;
         self.check_request_filter(collection, strict_mode_config)?;
+        self.check_request_exact(strict_mode_config)?;
+        self.check_search_params(collection, strict_mode_config)?;
         Ok(())
     }
-}
-
-pub(crate) fn check_bool(
-    value: bool,
-    allowed: Option<bool>,
-    name: &str,
-    parameter: &str,
-) -> Result<(), CollectionError> {
-    check_bool_opt(Some(value), allowed, name, parameter)
 }
 
 pub(crate) fn check_bool_opt(
@@ -152,4 +193,49 @@ pub(crate) fn check_limit_opt<T: PartialOrd + Display>(
     }
 
     Ok(())
+}
+
+impl StrictModeVerification for SearchParams {
+    fn check_custom(
+        &self,
+        _collection: &Collection,
+        strict_mode_config: &StrictModeConfig,
+    ) -> Result<(), CollectionError> {
+        check_limit_opt(
+            self.quantization.and_then(|i| i.oversampling),
+            strict_mode_config.search_max_oversampling,
+            "oversampling",
+        )?;
+
+        check_limit_opt(
+            self.hnsw_ef,
+            strict_mode_config.search_max_hnsw_ef,
+            "hnsw_ef",
+        )?;
+        Ok(())
+    }
+
+    fn request_exact(&self) -> Option<bool> {
+        Some(self.exact)
+    }
+
+    fn query_limit(&self) -> Option<usize> {
+        None
+    }
+
+    fn timeout(&self) -> Option<usize> {
+        None
+    }
+
+    fn indexed_filter_read(&self) -> Option<&Filter> {
+        None
+    }
+
+    fn indexed_filter_write(&self) -> Option<&Filter> {
+        None
+    }
+
+    fn request_search_params(&self) -> Option<&SearchParams> {
+        None
+    }
 }

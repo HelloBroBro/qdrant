@@ -8,6 +8,8 @@ use std::thread::sleep;
 use std::time::{Duration, Instant};
 
 use common::iterator_ext::IteratorExt;
+use common::tar_ext;
+use futures::future::try_join_all;
 use io::storage_version::StorageVersion;
 use parking_lot::{RwLock, RwLockReadGuard, RwLockUpgradableReadGuard, RwLockWriteGuard};
 use rand::seq::SliceRandom;
@@ -799,10 +801,10 @@ impl<'s> SegmentHolder {
         segments_path: &Path,
         collection_params: Option<&CollectionParams>,
         payload_index_schema: &PayloadIndexSchema,
-        f: F,
+        mut f: F,
     ) -> OperationResult<()>
     where
-        F: Fn(Arc<RwLock<dyn SegmentEntry>>) -> OperationResult<()>,
+        F: FnMut(Arc<RwLock<dyn SegmentEntry>>) -> OperationResult<()>,
     {
         let segments_lock = segments.upgradable_read();
 
@@ -1153,10 +1155,12 @@ impl<'s> SegmentHolder {
         collection_params: Option<&CollectionParams>,
         payload_index_schema: &PayloadIndexSchema,
         temp_dir: &Path,
-        snapshot_dir_path: &Path,
+        tar: &tar_ext::BuilderExt,
     ) -> OperationResult<()> {
         // Snapshotting may take long-running read locks on segments blocking incoming writes, do
         // this through proxied segments to allow writes to continue.
+
+        let mut snapshotted_segments = HashSet::<String>::new();
         Self::proxy_all_segments_and_apply(
             segments,
             segments_path,
@@ -1164,7 +1168,7 @@ impl<'s> SegmentHolder {
             payload_index_schema,
             |segment| {
                 let read_segment = segment.read();
-                read_segment.take_snapshot(temp_dir, snapshot_dir_path)?;
+                read_segment.take_snapshot(temp_dir, tar, &mut snapshotted_segments)?;
                 Ok(())
             },
         )
@@ -1187,21 +1191,40 @@ impl<'s> SegmentHolder {
     /// If two points have the same id and version, one of them is kept.
     ///
     /// Deduplication works with plain segments only.
-    pub fn deduplicate_points(&self) -> OperationResult<usize> {
+    pub async fn deduplicate_points(&self) -> OperationResult<usize> {
         let points_to_remove = self.find_duplicated_points();
 
-        let mut removed_points = 0;
-        for (segment_id, points) in points_to_remove {
-            let locked_segment = self.get(segment_id).unwrap();
-            let segment_arc = locked_segment.get();
-            let mut write_segment = segment_arc.write();
-            for point_id in points {
-                if let Some(point_version) = write_segment.point_version(point_id) {
-                    removed_points += 1;
-                    write_segment.delete_point(point_version, point_id)?;
-                }
-            }
-        }
+        // Create (blocking) task per segment for points to delete so we can parallelize
+        let tasks = points_to_remove
+            .into_iter()
+            .map(|(segment_id, points)| {
+                let locked_segment = self.get(segment_id).unwrap().clone();
+                tokio::task::spawn_blocking(move || {
+                    let mut removed_points = 0;
+                    let segment_arc = locked_segment.get();
+                    let mut write_segment = segment_arc.write();
+                    for point_id in points {
+                        if let Some(point_version) = write_segment.point_version(point_id) {
+                            removed_points += 1;
+                            write_segment.delete_point(point_version, point_id)?;
+                        }
+                    }
+                    OperationResult::Ok(removed_points)
+                })
+            })
+            .collect::<Vec<_>>();
+
+        // Join and sum results in parallel
+        let removed_points = try_join_all(tasks)
+            .await
+            .map_err(|err| {
+                OperationError::service_error(format!(
+                    "Failed to join task that removes duplicate points from segment: {err}"
+                ))
+            })?
+            .into_iter()
+            .sum::<Result<_, _>>()?;
+
         Ok(removed_points)
     }
 
@@ -1285,7 +1308,7 @@ impl<'s> SegmentHolder {
 
 #[cfg(test)]
 mod tests {
-    use std::fs::read_dir;
+    use std::fs::File;
     use std::str::FromStr;
 
     use segment::data_types::vectors::Vector;
@@ -1559,8 +1582,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_points_deduplication() {
+    #[tokio::test]
+    async fn test_points_deduplication() {
         let dir = Builder::new().prefix("segment_dir").tempdir().unwrap();
 
         let mut segment1 = build_segment_1(dir.path());
@@ -1585,7 +1608,7 @@ mod tests {
         let sid1 = holder.add_new(segment1);
         let sid2 = holder.add_new(segment2);
 
-        let res = holder.deduplicate_points().unwrap();
+        let res = holder.deduplicate_points().await.unwrap();
 
         assert_eq!(5, res);
 
@@ -1622,14 +1645,15 @@ mod tests {
 
         let segments_dir = Builder::new().prefix("segments_dir").tempdir().unwrap();
         let temp_dir = Builder::new().prefix("temp_dir").tempdir().unwrap();
-        let snapshot_dir = Builder::new().prefix("snapshot_dir").tempdir().unwrap();
+        let snapshot_file = Builder::new().suffix(".snapshot.tar").tempfile().unwrap();
+        let tar = tar_ext::BuilderExt::new(File::create(&snapshot_file).unwrap());
         SegmentHolder::snapshot_all_segments(
             holder.clone(),
             segments_dir.path(),
             None,
             &PayloadIndexSchema::default(),
             temp_dir.path(),
-            snapshot_dir.path(),
+            &tar,
         )
         .unwrap();
 
@@ -1644,7 +1668,8 @@ mod tests {
             "segment holder IDs before and after snapshotting must be equal",
         );
 
-        let archive_count = read_dir(&snapshot_dir).unwrap().count();
+        let mut tar = tar::Archive::new(File::open(&snapshot_file).unwrap());
+        let archive_count = tar.entries_with_seek().unwrap().count();
         // one archive produced per concrete segment in the SegmentHolder
         assert_eq!(archive_count, 2);
     }

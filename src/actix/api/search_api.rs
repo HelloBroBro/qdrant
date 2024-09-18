@@ -8,13 +8,14 @@ use collection::operations::types::{
 };
 use futures::TryFutureExt;
 use itertools::Itertools;
+use storage::content_manager::collection_verification::check_strict_mode;
 use storage::dispatcher::Dispatcher;
 use tokio::time::Instant;
 
 use super::read_params::ReadParams;
 use super::CollectionPath;
 use crate::actix::auth::ActixAccess;
-use crate::actix::helpers::{self, process_response};
+use crate::actix::helpers::{self, process_response, process_response_error};
 use crate::common::points::{
     do_core_search_points, do_search_batch_points, do_search_point_groups, do_search_points_matrix,
 };
@@ -32,6 +33,12 @@ async fn search_points(
         shard_key,
     } = request.into_inner();
 
+    let pass =
+        match check_strict_mode(&search_request, &collection.name, &dispatcher, &access).await {
+            Ok(pass) => pass,
+            Err(err) => return process_response_error(err, Instant::now()),
+        };
+
     let shard_selection = match shard_key {
         None => ShardSelectorInternal::All,
         Some(shard_keys) => shard_keys.into(),
@@ -39,7 +46,7 @@ async fn search_points(
 
     helpers::time(
         do_core_search_points(
-            dispatcher.toc(&access),
+            dispatcher.toc_new(&access, &pass),
             &collection.name,
             search_request.into(),
             params.consistency,
@@ -66,6 +73,12 @@ async fn batch_search_points(
     ActixAccess(access): ActixAccess,
 ) -> HttpResponse {
     let request = request.into_inner();
+
+    let pass = match check_strict_mode(&request, &collection.name, &dispatcher, &access).await {
+        Ok(pass) => pass,
+        Err(err) => return process_response_error(err, Instant::now()),
+    };
+
     let requests = request
         .searches
         .into_iter()
@@ -86,7 +99,7 @@ async fn batch_search_points(
 
     helpers::time(
         do_search_batch_points(
-            dispatcher.toc(&access),
+            dispatcher.toc_new(&access, &pass),
             &collection.name,
             requests,
             params.consistency,
@@ -121,13 +134,25 @@ async fn search_point_groups(
         shard_key,
     } = request.into_inner();
 
+    let pass = match check_strict_mode(
+        &search_group_request,
+        &collection.name,
+        &dispatcher,
+        &access,
+    )
+    .await
+    {
+        Ok(pass) => pass,
+        Err(err) => return process_response_error(err, Instant::now()),
+    };
+
     let shard_selection = match shard_key {
         None => ShardSelectorInternal::All,
         Some(shard_keys) => shard_keys.into(),
     };
 
     helpers::time(do_search_point_groups(
-        dispatcher.toc(&access),
+        dispatcher.toc_new(&access, &pass),
         &collection.name,
         search_group_request,
         params.consistency,
@@ -146,6 +171,7 @@ async fn search_points_matrix_pairs(
     params: Query<ReadParams>,
     ActixAccess(access): ActixAccess,
 ) -> impl Responder {
+    // TDOO check for strict mode!
     let timing = Instant::now();
 
     let SearchMatrixRequest {
@@ -181,6 +207,7 @@ async fn search_points_matrix_offsets(
     params: Query<ReadParams>,
     ActixAccess(access): ActixAccess,
 ) -> impl Responder {
+    // TDOO check for strict mode!
     let timing = Instant::now();
 
     let SearchMatrixRequest {

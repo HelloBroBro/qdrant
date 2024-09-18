@@ -7,7 +7,7 @@ use segment::telemetry::SegmentTelemetry;
 use serde::Serialize;
 
 use crate::collection_manager::optimizers::TrackerTelemetry;
-use crate::operations::types::OptimizersStatus;
+use crate::operations::types::{OptimizersStatus, ShardStatus};
 use crate::shards::replica_set::ReplicaState;
 use crate::shards::shard::{PeerId, ShardId};
 
@@ -30,6 +30,9 @@ pub struct RemoteShardTelemetry {
 #[derive(Serialize, Clone, Debug, JsonSchema)]
 pub struct LocalShardTelemetry {
     pub variant_name: Option<String>,
+    pub status: Option<ShardStatus>,
+    /// Total number of optimized points since the last start.
+    pub total_optimized_points: usize,
     pub segments: Vec<SegmentTelemetry>,
     pub optimizations: OptimizerTelemetry,
 }
@@ -55,6 +58,8 @@ impl Anonymize for LocalShardTelemetry {
     fn anonymize(&self) -> Self {
         LocalShardTelemetry {
             variant_name: self.variant_name.clone(),
+            status: self.status,
+            total_optimized_points: self.total_optimized_points.anonymize(),
             segments: self.segments.anonymize(),
             optimizations: self.optimizations.anonymize(),
         }

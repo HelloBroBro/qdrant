@@ -409,7 +409,7 @@ impl Segment {
         &self,
         point_offset: PointOffsetType,
     ) -> OperationResult<Payload> {
-        self.payload_index.borrow().payload(point_offset)
+        self.payload_index.borrow().get_payload(point_offset)
     }
 
     pub fn save_current_state(&self) -> OperationResult<()> {
@@ -424,6 +424,9 @@ impl Segment {
         payload_index.infer_payload_type(key)
     }
 
+    /// Unpacks segment snapshot archive.
+    /// A call `restore_snapshot("foo/bar/baz/snapshot.tar", "segment-id")`
+    /// will result in a directory `foo/bar/baz/segment-id/`.
     pub fn restore_snapshot(snapshot_path: &Path, segment_id: &str) -> OperationResult<()> {
         let segment_path = snapshot_path.parent().unwrap().join(segment_id);
 
@@ -518,7 +521,9 @@ impl Segment {
 
             for internal_id in &internal_ids_to_delete {
                 // Drop removed points from payload index
-                self.payload_index.borrow_mut().drop(*internal_id)?;
+                self.payload_index
+                    .borrow_mut()
+                    .clear_payload(*internal_id)?;
 
                 // Drop removed points from vector storage
                 for vector_data in self.vector_data.values() {

@@ -11,7 +11,7 @@ mod sharding_keys;
 mod snapshots;
 mod state_management;
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::ops::Deref;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -51,7 +51,6 @@ use crate::shards::{replica_set, CollectionId};
 use crate::telemetry::CollectionTelemetry;
 
 /// Collection's data is split into several shards.
-#[allow(dead_code)]
 pub struct Collection {
     pub(crate) id: CollectionId,
     pub(crate) shards_holder: Arc<LockedShardHolder>,
@@ -372,54 +371,52 @@ impl Collection {
         let current_state = replica_set.peer_state(&peer_id);
 
         // Validation:
-        // 0. Check that `from_state` matches current state
+        //
+        // 1. Check that peer exists in the cluster (peer might *not* exist, if it was removed from
+        //    the cluster right before `SetShardReplicaSet` was proposed)
+        let peer_exists = self
+            .channel_service
+            .id_to_address
+            .read()
+            .contains_key(&peer_id);
 
+        let replica_exists = replica_set.peer_state(&peer_id).is_some();
+
+        if !peer_exists && !replica_exists {
+            return Err(CollectionError::bad_input(format!(
+                "Can't set replica {peer_id}:{shard_id} state to {state:?}, \
+                 because replica {peer_id}:{shard_id} does not exist \
+                 and peer {peer_id} is not part of the cluster"
+            )));
+        }
+
+        // 2. Check that `from_state` matches current state
         if from_state.is_some() && current_state != from_state {
             return Err(CollectionError::bad_input(format!(
                 "Replica {peer_id} of shard {shard_id} has state {current_state:?}, but expected {from_state:?}"
             )));
         }
 
-        // 1. Do not deactivate the last active replica
-
-        if state != ReplicaState::Active {
-            let active_replicas: HashSet<_> = replica_set
-                .peers()
-                .into_iter()
-                .filter_map(|(peer, state)| {
-                    if state == ReplicaState::Active {
-                        Some(peer)
-                    } else {
-                        None
-                    }
-                })
-                .collect();
-            if active_replicas.len() == 1 && active_replicas.contains(&peer_id) {
-                return Err(CollectionError::bad_input(format!(
-                    "Cannot deactivate the last active replica {peer_id} of shard {shard_id}"
-                )));
-            }
+        // 3. Do not deactivate the last active replica
+        if state != ReplicaState::Active && replica_set.is_last_active_replica(peer_id) {
+            return Err(CollectionError::bad_input(format!(
+                "Cannot deactivate the last active replica {peer_id} of shard {shard_id}"
+            )));
         }
 
         // Abort resharding, if resharding shard is marked as `Dead`.
         //
-        // This branch should only be triggered, if resharding is currently at
-        // `ReshardStage::MigratingPoints` stage, because resharding shard should be marked as
-        // `Active` when all resharding transfers are successfully completed, and so the check
-        // *right above* this one should be triggered.
+        // This branch should only be triggered, if resharding is currently at `MigratingPoints`
+        // stage, because target shard should be marked as `Active`, when all resharding transfers
+        // are successfully completed, and so the check *right above* this one would be triggered.
         //
-        // So, if resharding reached `ReshardingStage::ReadHashRingCommitted`, this branch *won't*
-        // be triggered, and in this case, resharding *won't* be cancelled. Though, the update
-        // request should *fail* with "failed to update all replicas of a shard" error.
+        // So, if resharding reached `ReadHashRingCommitted`, this branch *won't* be triggered,
+        // and resharding *won't* be cancelled. The update request should *fail* with "failed to
+        // update all replicas of a shard" error.
         //
-        // If resharding reached `ReshardingStage::WriteHashRingCommitted`, and this branch is
-        // triggered *somehow*, then `Collection::abort_resharding` call should return an error,
-        // so no special handling is needed for `ReshardingStage::WriteHashRingCommitted`.
-        //
-        // TODO(resharding):
-        //
-        // Abort resharding, if resharding shard is (being) marked as `Dead` and resharding is at
-        // `ReshardingStage::ReadHashRingCommitted` stage!? 🤔
+        // If resharding reached `ReadHashRingCommitted`, and this branch is triggered *somehow*,
+        // then `Collection::abort_resharding` call should return an error, so no special handling
+        // is needed.
         if current_state == Some(ReplicaState::Resharding) && state == ReplicaState::Dead {
             let shard_key = shard_holder
                 .get_shard_id_to_key_mapping()
@@ -454,9 +451,12 @@ impl Collection {
 
             // Terminate transfer if source or target replicas are now dead
             let related_transfers = shard_holder.get_related_transfers(&shard_id, &peer_id);
+
+            // `abort_shard_transfer` locks `shard_holder`!
+            drop(shard_holder);
+
             for transfer in related_transfers {
-                self.abort_shard_transfer(transfer.key(), Some(&shard_holder))
-                    .await?;
+                self.abort_shard_transfer(transfer.key(), None).await?;
             }
         }
 
@@ -739,7 +739,9 @@ impl Collection {
             (
                 shards_telemetry,
                 shards_holder.get_shard_transfer_info(&*self.transfer_tasks.lock().await),
-                shards_holder.get_resharding_operations_info(&*self.reshard_tasks.lock().await),
+                shards_holder
+                    .get_resharding_operations_info(&*self.reshard_tasks.lock().await)
+                    .unwrap_or_default(),
             )
         };
 

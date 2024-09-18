@@ -508,13 +508,15 @@ pub trait SegmentOptimizer {
     /// New optimized segment should be added into `segments`.
     /// If there were any record changes during the optimization - an additional plain segment will be created.
     ///
+    /// Returns id of the created optimized segment. If no optimization was done - returns None
+    ///
     fn optimize(
         &self,
         segments: LockedSegmentHolder,
         ids: Vec<SegmentId>,
         permit: CpuPermit,
         stopped: &AtomicBool,
-    ) -> CollectionResult<bool> {
+    ) -> CollectionResult<usize> {
         check_process_stopped(stopped)?;
 
         let mut timer = ScopeDurationMeasurer::new(self.get_telemetry_counter());
@@ -543,7 +545,7 @@ pub trait SegmentOptimizer {
 
         if !all_segments_ok {
             // Cancel the optimization
-            return Ok(false);
+            return Ok(0);
         }
 
         check_process_stopped(stopped)?;
@@ -635,10 +637,8 @@ pub trait SegmentOptimizer {
 
         // ---- SLOW PART ENDS HERE -----
 
-        check_process_stopped(stopped).map_err(|error| {
-            self.handle_cancellation(&segments, &proxy_ids, &tmp_segment);
-            error
-        })?;
+        check_process_stopped(stopped)
+            .inspect_err(|_| self.handle_cancellation(&segments, &proxy_ids, &tmp_segment))?;
 
         {
             // This block locks all operations with collection. It should be fast
@@ -665,6 +665,8 @@ pub trait SegmentOptimizer {
             }
 
             optimized_segment.prefault_mmap_pages();
+
+            let point_count = optimized_segment.available_point_count();
 
             let (_, proxies) = write_segments_guard.swap_new(optimized_segment, &proxy_ids);
             debug_assert_eq!(
@@ -702,9 +704,10 @@ pub trait SegmentOptimizer {
                 }
                 tmp_segment.drop_data()?;
             }
-        }
 
-        timer.set_success(true);
-        Ok(true)
+            timer.set_success(true);
+
+            Ok(point_count)
+        }
     }
 }

@@ -2,12 +2,12 @@ use std::fmt::Formatter;
 use std::path::PathBuf;
 
 use common::types::PointOffsetType;
-use delegate::delegate;
 use serde_json::Value;
 
 use super::binary_index::BinaryIndexBuilder;
 use super::facet_index::FacetIndex;
-use super::full_text_index::text_index::FullTextIndexBuilder;
+use super::full_text_index::mmap_text_index::FullTextMmapIndexBuilder;
+use super::full_text_index::text_index::{FullTextIndex, FullTextIndexBuilder};
 use super::geo_index::GeoMapIndexBuilder;
 use super::map_index::{MapIndex, MapIndexBuilder, MapIndexMmapBuilder};
 use super::numeric_index::{
@@ -17,7 +17,6 @@ use crate::common::operation_error::OperationResult;
 use crate::common::Flusher;
 use crate::data_types::order_by::OrderValue;
 use crate::index::field_index::binary_index::BinaryIndex;
-use crate::index::field_index::full_text_index::text_index::FullTextIndex;
 use crate::index::field_index::geo_index::GeoMapIndex;
 use crate::index::field_index::numeric_index::NumericIndexInner;
 use crate::index::field_index::{CardinalityEstimation, PayloadBlockCondition};
@@ -423,6 +422,7 @@ pub enum FieldIndexBuilder {
     FloatMmapIndex(NumericIndexMmapBuilder<FloatPayloadType, FloatPayloadType>),
     GeoIndex(GeoMapIndexBuilder),
     FullTextIndex(FullTextIndexBuilder),
+    FullTextMmapIndex(FullTextMmapIndexBuilder),
     BinaryIndex(BinaryIndexBuilder),
     UuidIndex(MapIndexBuilder<UuidIntType>),
     UuidMmapIndex(MapIndexMmapBuilder<UuidIntType>),
@@ -431,26 +431,47 @@ pub enum FieldIndexBuilder {
 impl FieldIndexBuilderTrait for FieldIndexBuilder {
     type FieldIndexType = FieldIndex;
 
-    delegate! {
-        to match self {
-            Self::IntIndex(index) => index,
-            Self::IntMmapIndex(index) => index,
-            Self::DatetimeIndex(index) => index,
-            Self::DatetimeMmapIndex(index) => index,
-            Self::IntMapIndex(index) => index,
-            Self::IntMapMmapIndex(index) => index,
-            Self::KeywordIndex(index) => index,
-            Self::KeywordMmapIndex(index) => index,
-            Self::FloatIndex(index) => index,
-            Self::FloatMmapIndex(index) => index,
-            Self::GeoIndex(index) => index,
-            Self::BinaryIndex(index) => index,
-            Self::FullTextIndex(index) => index,
-            Self::UuidIndex(index) => index,
-            Self::UuidMmapIndex(index) => index,
-        } {
-            fn init(&mut self) -> OperationResult<()>;
-            fn add_point(&mut self, id: PointOffsetType, payload: &[&Value]) -> OperationResult<()>;
+    fn init(&mut self) -> OperationResult<()> {
+        match self {
+            Self::IntIndex(index) => index.init(),
+            Self::IntMmapIndex(index) => index.init(),
+            Self::DatetimeIndex(index) => index.init(),
+            Self::DatetimeMmapIndex(index) => index.init(),
+            Self::IntMapIndex(index) => index.init(),
+            Self::IntMapMmapIndex(index) => index.init(),
+            Self::KeywordIndex(index) => index.init(),
+            Self::KeywordMmapIndex(index) => index.init(),
+            Self::FloatIndex(index) => index.init(),
+            Self::FloatMmapIndex(index) => index.init(),
+            Self::GeoIndex(index) => index.init(),
+            Self::BinaryIndex(index) => index.init(),
+            Self::FullTextIndex(index) => index.init(),
+            Self::FullTextMmapIndex(builder) => builder.init(),
+            Self::UuidIndex(index) => index.init(),
+            Self::UuidMmapIndex(index) => index.init(),
+        }
+    }
+
+    fn add_point(&mut self, id: PointOffsetType, payload: &[&Value]) -> OperationResult<()> {
+        match self {
+            Self::IntIndex(index) => index.add_point(id, payload),
+            Self::IntMmapIndex(index) => index.add_point(id, payload),
+            Self::DatetimeIndex(index) => index.add_point(id, payload),
+            Self::DatetimeMmapIndex(index) => index.add_point(id, payload),
+            Self::IntMapIndex(index) => index.add_point(id, payload),
+            Self::IntMapMmapIndex(index) => index.add_point(id, payload),
+            Self::KeywordIndex(index) => index.add_point(id, payload),
+            Self::KeywordMmapIndex(index) => index.add_point(id, payload),
+            Self::FloatIndex(index) => index.add_point(id, payload),
+            Self::FloatMmapIndex(index) => index.add_point(id, payload),
+            Self::GeoIndex(index) => index.add_point(id, payload),
+            Self::BinaryIndex(index) => index.add_point(id, payload),
+            Self::FullTextIndex(index) => index.add_point(id, payload),
+            Self::FullTextMmapIndex(builder) => {
+                FieldIndexBuilderTrait::add_point(builder, id, payload)
+            }
+            Self::UuidIndex(index) => index.add_point(id, payload),
+            Self::UuidMmapIndex(index) => index.add_point(id, payload),
         }
     }
 
@@ -469,6 +490,7 @@ impl FieldIndexBuilderTrait for FieldIndexBuilder {
             Self::GeoIndex(index) => FieldIndex::GeoIndex(index.finalize()?),
             Self::BinaryIndex(index) => FieldIndex::BinaryIndex(index.finalize()?),
             Self::FullTextIndex(index) => FieldIndex::FullTextIndex(index.finalize()?),
+            Self::FullTextMmapIndex(builder) => FieldIndex::FullTextIndex(builder.finalize()?),
             Self::UuidIndex(index) => FieldIndex::UuidMapIndex(index.finalize()?),
             Self::UuidMmapIndex(index) => FieldIndex::UuidMapIndex(index.finalize()?),
         })

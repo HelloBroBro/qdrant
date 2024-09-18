@@ -357,6 +357,11 @@ impl ShardReplicaSet {
         self.replica_state.read().peers()
     }
 
+    pub fn is_last_active_replica(&self, peer_id: PeerId) -> bool {
+        let active_peers = self.replica_state.read().active_peers();
+        active_peers.len() == 1 && active_peers.contains(&peer_id)
+    }
+
     pub fn peer_state(&self, peer_id: &PeerId) -> Option<ReplicaState> {
         self.replica_state.read().get_peer_state(peer_id).copied()
     }
@@ -746,12 +751,16 @@ impl ShardReplicaSet {
 
     pub(crate) async fn get_telemetry_data(&self, detail: TelemetryDetail) -> ReplicaSetTelemetry {
         let local_shard = self.local.read().await;
-        let local = local_shard
-            .as_ref()
-            .map(|local_shard| local_shard.get_telemetry_data(detail));
+        let local = local_shard.as_ref();
+
+        let local_telemetry = match local {
+            Some(local_shard) => Some(local_shard.get_telemetry_data(detail).await),
+            None => None,
+        };
+
         ReplicaSetTelemetry {
             id: self.shard_id,
-            local,
+            local: local_telemetry,
             remote: self
                 .remotes
                 .read()

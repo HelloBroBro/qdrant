@@ -3,6 +3,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use common::tar_ext;
 use segment::data_types::facets::{FacetParams, FacetResponse};
 use segment::data_types::order_by::OrderBy;
 use segment::types::{
@@ -12,7 +13,7 @@ use tokio::runtime::Handle;
 
 use crate::operations::types::{
     CollectionError, CollectionInfo, CollectionResult, CoreSearchRequestBatch,
-    CountRequestInternal, CountResult, PointRequestInternal, Record, UpdateResult,
+    CountRequestInternal, CountResult, PointRequestInternal, Record, ShardStatus, UpdateResult,
 };
 use crate::operations::universal_query::shard_query::{ShardQueryRequest, ShardQueryResponse};
 use crate::operations::OperationWithClockTag;
@@ -34,7 +35,7 @@ impl DummyShard {
     pub async fn create_snapshot(
         &self,
         _temp_path: &Path,
-        _target_path: &Path,
+        _tar: &tar_ext::BuilderExt,
         _save_wal: bool,
     ) -> CollectionResult<()> {
         self.dummy()
@@ -47,6 +48,8 @@ impl DummyShard {
     pub fn get_telemetry_data(&self) -> LocalShardTelemetry {
         LocalShardTelemetry {
             variant_name: Some("dummy shard".into()),
+            status: Some(ShardStatus::Green),
+            total_optimized_points: 0,
             segments: vec![],
             optimizations: Default::default(),
         }

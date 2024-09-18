@@ -52,11 +52,11 @@ segment = { path = "../segment" }
 collection = { path = "../collection" }
 api = { path = "../api" }
 futures = { workspace = true }
-anyhow = "1.0.86"
+anyhow = "1.0.89"
 uuid = { workspace = true }
 url = "2.5.2"
 reqwest = { workspace = true }
 tempfile = { workspace = true }
-async-trait = "0.1.81"
+async-trait = "0.1.82"
 
 tracing = { workspace = true, optional = true }

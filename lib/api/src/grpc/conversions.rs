@@ -22,8 +22,8 @@ use super::qdrant::{
     DatetimeIndexParams, DatetimeRange, Direction, FacetHit, FacetHitInternal, FacetValue,
     FacetValueInternal, FieldType, FloatIndexParams, GeoIndexParams, GeoLineString, GroupId,
     KeywordIndexParams, LookupLocation, MultiVectorComparator, MultiVectorConfig, OrderBy,
-    OrderValue, Range, RawVector, RecommendStrategy, SearchPointGroups, SearchPoints,
-    ShardKeySelector, SparseIndices, StartFrom, UuidIndexParams, WithLookup,
+    OrderValue, Range, RawVector, RecommendStrategy, SearchMatrixPair, SearchPointGroups,
+    SearchPoints, ShardKeySelector, SparseIndices, StartFrom, UuidIndexParams, WithLookup,
 };
 use crate::grpc::models::{CollectionsResponse, VersionInfo};
 use crate::grpc::qdrant::condition::ConditionOneOf;
@@ -89,7 +89,8 @@ fn json_to_proto(json_value: serde_json::Value) -> Value {
 }
 
 pub fn json_path_from_proto(a: &str) -> Result<JsonPath, Status> {
-    JsonPath::try_from(a).map_err(|_| Status::invalid_argument("Invalid json path"))
+    JsonPath::try_from(a)
+        .map_err(|_| Status::invalid_argument(format!("Invalid json path: \'{a}\'")))
 }
 
 pub fn proto_to_payloads(proto: HashMap<String, Value>) -> Result<segment::types::Payload, Status> {
@@ -273,6 +274,7 @@ impl From<segment::data_types::index::TextIndexParams> for PayloadIndexParams {
                 lowercase: params.lowercase,
                 min_token_len: params.min_token_len.map(|x| x as u64),
                 max_token_len: params.max_token_len.map(|x| x as u64),
+                on_disk: params.on_disk,
             })),
         }
     }
@@ -433,6 +435,7 @@ impl TryFrom<TextIndexParams> for segment::data_types::index::TextIndexParams {
             lowercase: params.lowercase,
             min_token_len: params.min_token_len.map(|x| x as usize),
             max_token_len: params.max_token_len.map(|x| x as usize),
+            on_disk: params.on_disk,
         })
     }
 }
@@ -2321,6 +2324,16 @@ impl From<segment_facets::FacetValue> for FacetValue {
                     Variant::StringValue(Uuid::from_u128(value).to_string())
                 }
             }),
+        }
+    }
+}
+
+impl From<rest::SearchMatrixPair> for SearchMatrixPair {
+    fn from(pair: rest::SearchMatrixPair) -> Self {
+        Self {
+            a: Some(pair.a.into()),
+            b: Some(pair.b.into()),
+            score: pair.score,
         }
     }
 }
