@@ -822,6 +822,11 @@
 
 
 
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| on_disk | [bool](#bool) | optional | If true - store index on disk. |
+
+
 
 
 
@@ -2509,6 +2514,7 @@ The JSON representation for `Value` is a JSON value.
 | ----- | ---- | ----- | ----------- |
 | string_value | [string](#string) |  | String value from the facet |
 | integer_value | [int64](#int64) |  | Integer value from the facet |
+| bool_value | [bool](#bool) |  | Boolean value from the facet |
 
 
 

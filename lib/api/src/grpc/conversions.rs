@@ -42,9 +42,9 @@ use crate::grpc::qdrant::{
     PayloadIncludeSelector, PayloadIndexParams, PayloadSchemaInfo, PayloadSchemaType, PointId,
     PointsOperationResponse, PointsOperationResponseInternal, ProductQuantization,
     QuantizationConfig, QuantizationSearchParams, QuantizationType, RepeatedIntegers,
-    RepeatedStrings, ScalarQuantization, ScoredPoint, SearchParams, ShardKey, SparseVector, Struct,
-    TextIndexParams, TokenizerType, UpdateResult, UpdateResultInternal, Value, ValuesCount, Vector,
-    Vectors, VectorsSelector, WithPayloadSelector, WithVectorsSelector,
+    RepeatedStrings, ScalarQuantization, ScoredPoint, SearchParams, ShardKey, SparseVector,
+    StrictModeConfig, Struct, TextIndexParams, TokenizerType, UpdateResult, UpdateResultInternal,
+    Value, ValuesCount, Vector, Vectors, VectorsSelector, WithPayloadSelector, WithVectorsSelector,
 };
 use crate::rest::schema as rest;
 
@@ -258,9 +258,11 @@ impl From<segment::data_types::index::FloatIndexParams> for PayloadIndexParams {
 }
 
 impl From<segment::data_types::index::GeoIndexParams> for PayloadIndexParams {
-    fn from(_params: segment::data_types::index::GeoIndexParams) -> Self {
+    fn from(params: segment::data_types::index::GeoIndexParams) -> Self {
         PayloadIndexParams {
-            index_params: Some(IndexParams::GeoIndexParams(GeoIndexParams {})),
+            index_params: Some(IndexParams::GeoIndexParams(GeoIndexParams {
+                on_disk: params.on_disk,
+            })),
         }
     }
 }
@@ -417,9 +419,10 @@ impl TryFrom<FloatIndexParams> for segment::data_types::index::FloatIndexParams 
 
 impl TryFrom<GeoIndexParams> for segment::data_types::index::GeoIndexParams {
     type Error = Status;
-    fn try_from(_params: GeoIndexParams) -> Result<Self, Self::Error> {
+    fn try_from(params: GeoIndexParams) -> Result<Self, Self::Error> {
         Ok(segment::data_types::index::GeoIndexParams {
             r#type: GeoIndexType::Geo,
+            on_disk: params.on_disk,
         })
     }
 }
@@ -1757,6 +1760,36 @@ impl From<HnswConfigDiff> for segment::types::HnswConfig {
     }
 }
 
+impl From<StrictModeConfig> for segment::types::StrictModeConfig {
+    fn from(value: StrictModeConfig) -> Self {
+        Self {
+            enabled: value.enabled,
+            max_query_limit: value.max_query_limit.map(|i| i as usize),
+            max_timeout: value.max_timeout.map(|i| i as usize),
+            unindexed_filtering_retrieve: value.unindexed_filtering_retrieve,
+            unindexed_filtering_update: value.unindexed_filtering_update,
+            search_max_hnsw_ef: value.search_max_hnsw_ef.map(|i| i as usize),
+            search_allow_exact: value.search_allow_exact,
+            search_max_oversampling: value.search_max_oversampling.map(f64::from),
+        }
+    }
+}
+
+impl From<segment::types::StrictModeConfig> for StrictModeConfig {
+    fn from(value: segment::types::StrictModeConfig) -> Self {
+        Self {
+            enabled: value.enabled,
+            max_query_limit: value.max_query_limit.map(|i| i as u32),
+            max_timeout: value.max_timeout.map(|i| i as u32),
+            unindexed_filtering_retrieve: value.unindexed_filtering_retrieve,
+            unindexed_filtering_update: value.unindexed_filtering_update,
+            search_max_hnsw_ef: value.search_max_hnsw_ef.map(|i| i as u32),
+            search_allow_exact: value.search_allow_exact,
+            search_max_oversampling: value.search_max_oversampling.map(|i| i as f32),
+        }
+    }
+}
+
 pub fn naive_date_time_to_proto(date_time: NaiveDateTime) -> prost_wkt_types::Timestamp {
     prost_wkt_types::Timestamp {
         seconds: date_time.and_utc().timestamp(), // number of non-leap seconds since the midnight on January 1, 1970.
@@ -2291,6 +2324,7 @@ impl TryFrom<FacetValueInternal> for segment_facets::FacetValue {
                 })?;
                 segment_facets::FacetValue::Uuid(Uuid::from_bytes(uuid_bytes).as_u128())
             }
+            Variant::BoolValue(value) => segment_facets::FacetValue::Bool(value),
         })
     }
 }
@@ -2307,6 +2341,7 @@ impl From<segment_facets::FacetValue> for FacetValueInternal {
                     let uuid = Uuid::from_u128(value);
                     Variant::UuidValue(uuid.as_bytes().to_vec())
                 }
+                segment_facets::FacetValue::Bool(value) => Variant::BoolValue(value),
             }),
         }
     }
@@ -2323,6 +2358,7 @@ impl From<segment_facets::FacetValue> for FacetValue {
                 segment_facets::FacetValue::Uuid(value) => {
                     Variant::StringValue(Uuid::from_u128(value).to_string())
                 }
+                segment_facets::FacetValue::Bool(value) => Variant::BoolValue(value),
             }),
         }
     }

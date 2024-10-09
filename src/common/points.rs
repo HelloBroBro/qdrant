@@ -8,7 +8,6 @@ use collection::collection::distance_matrix::{
 use collection::collection::Collection;
 use collection::common::batching::batch_requests;
 use collection::grouping::group_by::GroupRequest;
-use collection::operations::config_diff::StrictModeConfig;
 use collection::operations::consistency_params::ReadConsistency;
 use collection::operations::payload_ops::{
     DeletePayload, DeletePayloadOp, PayloadOps, SetPayload, SetPayloadOp,
@@ -29,14 +28,16 @@ use collection::operations::universal_query::collection_query::{
 use collection::operations::vector_ops::{
     DeleteVectors, UpdateVectors, UpdateVectorsOp, VectorOperations,
 };
-use collection::operations::verification::StrictModeVerification;
+use collection::operations::verification::{
+    new_unchecked_verification_pass, StrictModeVerification,
+};
 use collection::operations::{
     ClockTag, CollectionUpdateOperations, CreateIndex, FieldIndexOperations, OperationWithClockTag,
 };
 use collection::shards::shard::ShardId;
 use schemars::JsonSchema;
 use segment::json_path::JsonPath;
-use segment::types::{PayloadFieldSchema, PayloadKeyType, ScoredPoint};
+use segment::types::{PayloadFieldSchema, PayloadKeyType, ScoredPoint, StrictModeConfig};
 use serde::{Deserialize, Serialize};
 use storage::content_manager::collection_meta_ops::{
     CollectionMetaOperations, CreatePayloadIndex, DropPayloadIndex,
@@ -138,10 +139,6 @@ impl Validate for UpdateOperation {
 
 impl StrictModeVerification for UpdateOperation {
     fn query_limit(&self) -> Option<usize> {
-        None
-    }
-
-    fn timeout(&self) -> Option<usize> {
         None
     }
 
@@ -716,7 +713,10 @@ pub async fn do_create_index(
     // Default consensus timeout will be used
     let wait_timeout = None; // ToDo: make it configurable
 
-    let toc = dispatcher.toc(&access).clone();
+    // Nothing to verify here.
+    let pass = new_unchecked_verification_pass();
+
+    let toc = dispatcher.toc(&access, &pass).clone();
 
     // TODO: Is `submit_collection_meta_op` cancel-safe!? Should be, I think?.. 🤔
     dispatcher
@@ -792,7 +792,10 @@ pub async fn do_delete_index(
     // Default consensus timeout will be used
     let wait_timeout = None; // ToDo: make it configurable
 
-    let toc = dispatcher.toc(&access).clone();
+    // Nothing to verify here.
+    let pass = new_unchecked_verification_pass();
+
+    let toc = dispatcher.toc(&access, &pass).clone();
 
     // TODO: Is `submit_collection_meta_op` cancel-safe!? Should be, I think?.. 🤔
     dispatcher

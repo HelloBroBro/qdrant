@@ -1,7 +1,9 @@
-use super::StrictModeVerification;
-use crate::operations::types::{PointRequestInternal, ScrollRequestInternal};
+use api::rest::SearchMatrixRequestInternal;
 
-impl StrictModeVerification for ScrollRequestInternal {
+use super::StrictModeVerification;
+use crate::collection::distance_matrix::CollectionSearchMatrixRequest;
+
+impl StrictModeVerification for SearchMatrixRequestInternal {
     fn query_limit(&self) -> Option<usize> {
         self.limit
     }
@@ -23,13 +25,13 @@ impl StrictModeVerification for ScrollRequestInternal {
     }
 }
 
-impl StrictModeVerification for PointRequestInternal {
+impl StrictModeVerification for CollectionSearchMatrixRequest {
     fn query_limit(&self) -> Option<usize> {
-        None
+        Some(self.limit_per_sample)
     }
 
     fn indexed_filter_read(&self) -> Option<&segment::types::Filter> {
-        None
+        self.filter.as_ref()
     }
 
     fn indexed_filter_write(&self) -> Option<&segment::types::Filter> {
