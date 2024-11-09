@@ -123,6 +123,15 @@ impl RecoverableWal {
         )
     }
 
+    pub fn wal_version(&self) -> Result<Option<u64>, WalDeltaError> {
+        let wal = self.wal.lock();
+        if wal.is_empty() {
+            Ok(None)
+        } else {
+            Ok(Some(wal.last_index()))
+        }
+    }
+
     /// Append records to this WAL from `other`, starting at operation `append_from` in `other`.
     #[cfg(test)]
     pub async fn append_from(&self, other: &Self, append_from: u64) -> crate::wal::Result<()> {
@@ -268,7 +277,7 @@ mod tests {
 
     use super::*;
     use crate::operations::point_ops::{
-        PointInsertOperationsInternal, PointOperations, PointStruct,
+        PointInsertOperationsInternal, PointOperations, PointStructPersisted,
     };
     use crate::operations::{ClockTag, CollectionUpdateOperations, OperationWithClockTag};
     use crate::shards::local_shard::clock_map::{ClockMap, RecoveryPoint};
@@ -294,7 +303,7 @@ mod tests {
 
     fn mock_operation(id: u64) -> CollectionUpdateOperations {
         CollectionUpdateOperations::PointOperation(PointOperations::UpsertPoints(
-            PointInsertOperationsInternal::PointsList(vec![PointStruct {
+            PointInsertOperationsInternal::PointsList(vec![PointStructPersisted {
                 id: id.into(),
                 vector: VectorStructInternal::from(vec![1.0, 2.0, 3.0]).into(),
                 payload: None,
@@ -1264,7 +1273,7 @@ mod tests {
 
                 let bare_operation =
                     CollectionUpdateOperations::PointOperation(PointOperations::UpsertPoints(
-                        PointInsertOperationsInternal::PointsList(vec![PointStruct {
+                        PointInsertOperationsInternal::PointsList(vec![PointStructPersisted {
                             id: point_id_source.next().unwrap().into(),
                             vector: VectorStructInternal::from(
                                 std::iter::repeat_with(|| rng.gen::<f32>())
@@ -1310,7 +1319,7 @@ mod tests {
 
                 let bare_operation =
                     CollectionUpdateOperations::PointOperation(PointOperations::UpsertPoints(
-                        PointInsertOperationsInternal::PointsList(vec![PointStruct {
+                        PointInsertOperationsInternal::PointsList(vec![PointStructPersisted {
                             id: point_id_source.next().unwrap().into(),
                             vector: VectorStructInternal::from(
                                 std::iter::repeat_with(|| rng.gen::<f32>())

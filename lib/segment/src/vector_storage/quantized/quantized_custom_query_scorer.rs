@@ -1,6 +1,7 @@
 use std::borrow::Cow;
 use std::marker::PhantomData;
 
+use common::counter::hardware_counter::HardwareCounterCell;
 use common::types::{PointOffsetType, ScoreType};
 use itertools::Itertools;
 
@@ -26,6 +27,7 @@ where
     phantom: PhantomData<TEncodedQuery>,
     metric: PhantomData<TMetric>,
     element: PhantomData<TElement>,
+    hardware_counter: HardwareCounterCell,
 }
 
 impl<'a, TElement, TMetric, TEncodedQuery, TEncodedVectors, TQuery>
@@ -58,7 +60,6 @@ where
             })
             .unwrap();
         let query: TQuery = original_query
-            .clone()
             .transform(|original_vector| {
                 let original_vector_prequantized = TElement::quantization_preprocess(
                     quantization_config,
@@ -75,6 +76,7 @@ where
             phantom: PhantomData,
             metric: PhantomData,
             element: PhantomData,
+            hardware_counter: HardwareCounterCell::new(),
         }
     }
 
@@ -106,7 +108,6 @@ where
             .unwrap();
 
         let query: TQuery = original_query
-            .clone()
             .transform(|original_vector| {
                 let original_vector_prequantized = TElement::quantization_preprocess(
                     quantization_config,
@@ -123,6 +124,7 @@ where
             phantom: PhantomData,
             metric: PhantomData,
             element: PhantomData,
+            hardware_counter: HardwareCounterCell::new(),
         }
     }
 }
@@ -136,8 +138,10 @@ where
     TEncodedVectors: quantization::EncodedVectors<TEncodedQuery>,
 {
     fn score_stored(&self, idx: PointOffsetType) -> ScoreType {
-        self.query
-            .score_by(|this| self.quantized_storage.score_point(this, idx))
+        self.query.score_by(|this| {
+            self.quantized_storage
+                .score_point(this, idx, &self.hardware_counter)
+        })
     }
 
     fn score(&self, _v2: &[TElement]) -> ScoreType {
@@ -146,5 +150,15 @@ where
 
     fn score_internal(&self, _point_a: PointOffsetType, _point_b: PointOffsetType) -> ScoreType {
         unimplemented!("Custom scorer compares against multiple vectors, not just one")
+    }
+
+    fn take_hardware_counter(&self) -> HardwareCounterCell {
+        let mut counter = self.hardware_counter.take();
+
+        counter
+            .cpu_counter_mut()
+            .multiplied_mut(size_of::<TElement>());
+
+        counter
     }
 }

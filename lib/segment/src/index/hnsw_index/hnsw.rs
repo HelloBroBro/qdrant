@@ -7,6 +7,8 @@ use std::thread;
 
 use atomic_refcell::AtomicRefCell;
 use bitvec::prelude::BitSlice;
+use bitvec::vec::BitVec;
+use common::counter::hardware_counter::HardwareCounterCell;
 #[cfg(target_os = "linux")]
 use common::cpu::linux_low_thread_priority;
 use common::cpu::{get_num_cpus, CpuPermit};
@@ -25,7 +27,7 @@ use crate::common::operation_time_statistics::{
 };
 use crate::common::BYTES_IN_KB;
 use crate::data_types::query_context::VectorQueryContext;
-use crate::data_types::vectors::{QueryVector, Vector, VectorRef};
+use crate::data_types::vectors::{QueryVector, VectorInternal, VectorRef};
 use crate::id_tracker::IdTrackerSS;
 use crate::index::hnsw_index::build_condition_checker::BuildConditionChecker;
 use crate::index::hnsw_index::config::HnswGraphConfig;
@@ -116,7 +118,7 @@ impl<TGraphLinks: GraphLinks> HNSWIndex<TGraphLinks> {
                 let vector_storage = vector_storage.borrow();
                 let available_vectors = vector_storage.available_vector_count();
                 let full_scan_threshold = vector_storage
-                    .available_size_in_bytes()
+                    .size_in_bytes()
                     .checked_div(available_vectors)
                     .and_then(|avg_vector_size| {
                         hnsw_config
@@ -210,7 +212,7 @@ impl<TGraphLinks: GraphLinks> HNSWIndex<TGraphLinks> {
         let total_vector_count = vector_storage.total_vector_count();
 
         let full_scan_threshold = vector_storage
-            .available_size_in_bytes()
+            .size_in_bytes()
             .checked_div(total_vector_count)
             .and_then(|avg_vector_size| {
                 hnsw_config
@@ -312,6 +314,10 @@ impl<TGraphLinks: GraphLinks> HNSWIndex<TGraphLinks> {
                 let points_scorer = FilteredScorer::new(raw_scorer.as_ref(), None);
 
                 graph_layers_builder.link_new_point(vector_id, points_scorer);
+
+                // Ignore hardware counter, for internal operations
+                raw_scorer.take_hardware_counter().discard_results();
+
                 Ok::<_, OperationError>(())
             };
 
@@ -330,7 +336,6 @@ impl<TGraphLinks: GraphLinks> HNSWIndex<TGraphLinks> {
 
         let visited_pool = VisitedPool::new();
         let mut block_filter_list = visited_pool.get(total_vector_count);
-        let visits_iteration = block_filter_list.get_current_iteration_id();
 
         let payload_m = config.payload_m.unwrap_or(config.m);
 
@@ -340,6 +345,13 @@ impl<TGraphLinks: GraphLinks> HNSWIndex<TGraphLinks> {
             let average_links_per_0_level =
                 graph_layers_builder.get_average_connectivity_on_level(0);
             let average_links_per_0_level_int = (average_links_per_0_level as usize).max(1);
+
+            let mut indexed_vectors_set = if config.m != 0 {
+                // Every vector is already indexed in the main graph, so skip counting.
+                BitVec::new()
+            } else {
+                BitVec::repeat(false, total_vector_count)
+            };
 
             for (field, _) in payload_index.indexed_fields() {
                 debug!("building additional index for field {}", &field);
@@ -380,12 +392,13 @@ impl<TGraphLinks: GraphLinks> HNSWIndex<TGraphLinks> {
                         &mut additional_graph,
                         payload_block.condition,
                         &mut block_filter_list,
+                        &mut indexed_vectors_set,
                     )?;
                     graph_layers_builder.merge_from_other(additional_graph);
                 }
             }
 
-            let indexed_payload_vectors = block_filter_list.count_visits_since(visits_iteration);
+            let indexed_payload_vectors = indexed_vectors_set.count_ones();
 
             debug_assert!(indexed_vectors >= indexed_payload_vectors || config.m == 0);
             indexed_vectors = indexed_vectors.max(indexed_payload_vectors);
@@ -424,6 +437,7 @@ impl<TGraphLinks: GraphLinks> HNSWIndex<TGraphLinks> {
         graph_layers_builder: &mut GraphLayersBuilder,
         condition: FieldCondition,
         block_filter_list: &mut VisitedListHandle,
+        indexed_vectors_set: &mut BitVec,
     ) -> OperationResult<()> {
         block_filter_list.next_iteration();
 
@@ -445,6 +459,9 @@ impl<TGraphLinks: GraphLinks> HNSWIndex<TGraphLinks> {
 
         for block_point_id in points_to_index.iter().copied() {
             block_filter_list.check_and_update_visited(block_point_id);
+            if !indexed_vectors_set.is_empty() {
+                indexed_vectors_set.set(block_point_id as usize, true);
+            }
         }
 
         let insert_points = |block_point_id| {
@@ -469,6 +486,10 @@ impl<TGraphLinks: GraphLinks> HNSWIndex<TGraphLinks> {
                 FilteredScorer::new(raw_scorer.as_ref(), Some(&block_condition_checker));
 
             graph_layers_builder.link_new_point(block_point_id, points_scorer);
+
+            // Ignore hardware counter, for internal operations
+            raw_scorer.take_hardware_counter().discard_results();
+
             Ok::<_, OperationError>(())
         };
 
@@ -516,7 +537,7 @@ impl<TGraphLinks: GraphLinks> HNSWIndex<TGraphLinks> {
 
         let deleted_points = vector_query_context
             .deleted_points()
-            .unwrap_or(id_tracker.deleted_point_bitslice());
+            .unwrap_or_else(|| id_tracker.deleted_point_bitslice());
 
         let raw_scorer = Self::construct_search_scorer(
             vector,
@@ -534,7 +555,20 @@ impl<TGraphLinks: GraphLinks> HNSWIndex<TGraphLinks> {
         let search_result =
             self.graph
                 .search(oversampled_top, ef, points_scorer, custom_entry_points);
-        self.postprocess_search_result(search_result, vector, params, top, &is_stopped)
+
+        let hw_counter = HardwareCounterCell::new();
+        let res = self.postprocess_search_result(
+            search_result,
+            vector,
+            params,
+            top,
+            &is_stopped,
+            &hw_counter,
+        )?;
+
+        vector_query_context.apply_hardware_counter(raw_scorer.take_hardware_counter());
+        vector_query_context.apply_hardware_counter(hw_counter);
+        Ok(res)
     }
 
     fn search_vectors_with_graph(
@@ -576,7 +610,7 @@ impl<TGraphLinks: GraphLinks> HNSWIndex<TGraphLinks> {
 
         let deleted_points = vector_query_context
             .deleted_points()
-            .unwrap_or(id_tracker.deleted_point_bitslice());
+            .unwrap_or_else(|| id_tracker.deleted_point_bitslice());
 
         let is_stopped = vector_query_context.is_stopped();
 
@@ -593,7 +627,19 @@ impl<TGraphLinks: GraphLinks> HNSWIndex<TGraphLinks> {
         let search_result =
             raw_scorer.peek_top_iter(&mut filtered_points.iter().copied(), oversampled_top);
 
-        self.postprocess_search_result(search_result, vector, params, top, &is_stopped)
+        vector_query_context.apply_hardware_counter(raw_scorer.take_hardware_counter());
+
+        let hw_counter = HardwareCounterCell::new();
+        let res = self.postprocess_search_result(
+            search_result,
+            vector,
+            params,
+            top,
+            &is_stopped,
+            &hw_counter,
+        )?;
+        vector_query_context.apply_hardware_counter(hw_counter);
+        Ok(res)
     }
 
     fn search_vectors_plain(
@@ -617,7 +663,7 @@ impl<TGraphLinks: GraphLinks> HNSWIndex<TGraphLinks> {
 
     fn discovery_search_with_graph(
         &self,
-        discovery_query: DiscoveryQuery<Vector>,
+        discovery_query: DiscoveryQuery<VectorInternal>,
         filter: Option<&Filter>,
         top: usize,
         params: Option<&SearchParams>,
@@ -715,6 +761,7 @@ impl<TGraphLinks: GraphLinks> HNSWIndex<TGraphLinks> {
         params: Option<&SearchParams>,
         top: usize,
         is_stopped: &AtomicBool,
+        hardware_counter: &HardwareCounterCell,
     ) -> OperationResult<Vec<ScoredPointOffset>> {
         let id_tracker = self.id_tracker.borrow();
         let vector_storage = self.vector_storage.borrow();
@@ -743,6 +790,8 @@ impl<TGraphLinks: GraphLinks> HNSWIndex<TGraphLinks> {
             let mut ids_iterator = search_result.iter().map(|x| x.idx);
             let mut re_scored = raw_scorer.score_points_unfiltered(&mut ids_iterator);
 
+            hardware_counter.apply_from(raw_scorer.take_hardware_counter());
+
             re_scored.sort_unstable();
             re_scored.reverse();
             re_scored
@@ -755,7 +804,7 @@ impl<TGraphLinks: GraphLinks> HNSWIndex<TGraphLinks> {
 }
 
 impl HNSWIndex<GraphLinksMmap> {
-    pub fn prefault_mmap_pages(&self) -> Option<mmap_ops::PrefaultMmapPages> {
+    pub fn prefault_mmap_pages(&self) -> mmap_ops::PrefaultMmapPages {
         self.graph.prefault_mmap_pages(&self.path)
     }
 }
@@ -804,7 +853,12 @@ impl<TGraphLinks: GraphLinks> VectorIndex for HNSWIndex<TGraphLinks> {
                                 deleted_points,
                                 &is_stopped,
                             )
-                            .map(|scorer| scorer.peek_top_all(top))
+                            .map(|scorer| {
+                                let res = scorer.peek_top_all(top);
+                                query_context
+                                    .apply_hardware_counter(scorer.take_hardware_counter());
+                                res
+                            })
                         })
                         .collect()
                 } else {

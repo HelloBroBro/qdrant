@@ -25,6 +25,7 @@ pub type PeerId = u64;
 pub type ShardReplicasPlacement = Vec<PeerId>;
 
 /// List of shards placements. Each element defines placements of replicas for a single shard.
+///
 /// Number of elements corresponds to the number of shards.
 /// Example: [
 ///     [1, 2],
@@ -129,7 +130,7 @@ impl Shard {
         }
     }
 
-    pub async fn trigger_optimizers(&self) {
+    pub fn trigger_optimizers(&self) {
         match self {
             Shard::Local(local_shard) => local_shard.trigger_optimizers(),
             Shard::Proxy(proxy_shard) => proxy_shard.trigger_optimizers(),
@@ -215,8 +216,10 @@ impl Shard {
         // Resolve WAL delta and report
         match wal.resolve_wal_delta(recovery_point).await {
             Ok(Some(version)) => {
-                let size = wal.wal.lock().last_index().saturating_sub(version);
-                log::debug!("Resolved WAL delta from {version}, which counts {size} records");
+                log::debug!(
+                    "Resolved WAL delta from {version}, which counts {} records",
+                    wal.wal.lock().last_index().saturating_sub(version),
+                );
                 Ok(Some(version))
             }
 
@@ -228,6 +231,24 @@ impl Shard {
             Err(err) => Err(CollectionError::service_error(format!(
                 "Failed to resolve WAL delta on local shard: {err}"
             ))),
+        }
+    }
+
+    pub fn wal_version(&self) -> CollectionResult<Option<u64>> {
+        match self {
+            Self::Local(local_shard) => local_shard.wal.wal_version().map_err(|err| {
+                CollectionError::service_error(format!(
+                    "Cannot get WAL version on {}: {err}",
+                    self.variant_name(),
+                ))
+            }),
+
+            Self::Proxy(_) | Self::ForwardProxy(_) | Self::QueueProxy(_) | Self::Dummy(_) => {
+                Err(CollectionError::service_error(format!(
+                    "Cannot get WAL version on {}",
+                    self.variant_name(),
+                )))
+            }
         }
     }
 }

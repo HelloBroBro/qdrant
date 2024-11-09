@@ -549,6 +549,9 @@ pub struct UpdateCollection {
     /// New sparse vector parameters
     #[prost(message, optional, tag = "8")]
     pub sparse_vectors_config: ::core::option::Option<SparseVectorConfig>,
+    /// New strict mode configuration
+    #[prost(message, optional, tag = "9")]
+    pub strict_mode_config: ::core::option::Option<StrictModeConfig>,
 }
 #[derive(validator::Validate)]
 #[derive(serde::Serialize)]
@@ -3824,20 +3827,120 @@ pub struct SparseIndices {
     #[prost(uint32, repeated, tag = "1")]
     pub data: ::prost::alloc::vec::Vec<u32>,
 }
+#[derive(serde::Serialize)]
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct Document {
+    /// Text of the document
+    #[prost(string, tag = "1")]
+    pub text: ::prost::alloc::string::String,
+    /// Model name
+    #[prost(string, optional, tag = "3")]
+    pub model: ::core::option::Option<::prost::alloc::string::String>,
+    /// Model options
+    #[prost(map = "string, message", tag = "4")]
+    pub options: ::std::collections::HashMap<::prost::alloc::string::String, Value>,
+}
+#[derive(serde::Serialize)]
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct Image {
+    /// Image data, either base64 encoded or URL
+    #[prost(string, tag = "1")]
+    pub image: ::prost::alloc::string::String,
+    /// Model name
+    #[prost(string, optional, tag = "2")]
+    pub model: ::core::option::Option<::prost::alloc::string::String>,
+    /// Model options
+    #[prost(map = "string, message", tag = "3")]
+    pub options: ::std::collections::HashMap<::prost::alloc::string::String, Value>,
+}
+#[derive(serde::Serialize)]
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct InferenceObject {
+    /// Object to infer
+    #[prost(message, optional, tag = "1")]
+    pub object: ::core::option::Option<Value>,
+    /// Model name
+    #[prost(string, optional, tag = "2")]
+    pub model: ::core::option::Option<::prost::alloc::string::String>,
+    /// Model options
+    #[prost(map = "string, message", tag = "3")]
+    pub options: ::std::collections::HashMap<::prost::alloc::string::String, Value>,
+}
 /// Legacy vector format, which determines the vector type by the configuration of its fields.
 #[derive(serde::Serialize)]
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct Vector {
-    /// Vector data (flatten for multi vectors)
+    /// Vector data (flatten for multi vectors), deprecated
     #[prost(float, repeated, tag = "1")]
     pub data: ::prost::alloc::vec::Vec<f32>,
-    /// Sparse indices for sparse vectors
+    /// Sparse indices for sparse vectors, deprecated
     #[prost(message, optional, tag = "2")]
     pub indices: ::core::option::Option<SparseIndices>,
-    /// Number of vectors per multi vector
+    /// Number of vectors per multi vector, deprecated
     #[prost(uint32, optional, tag = "3")]
     pub vectors_count: ::core::option::Option<u32>,
+    #[prost(oneof = "vector::Vector", tags = "101, 102, 103, 104, 105, 106")]
+    pub vector: ::core::option::Option<vector::Vector>,
+}
+/// Nested message and enum types in `Vector`.
+pub mod vector {
+    #[derive(serde::Serialize)]
+    #[allow(clippy::derive_partial_eq_without_eq)]
+    #[derive(Clone, PartialEq, ::prost::Oneof)]
+    pub enum Vector {
+        /// Dense vector
+        #[prost(message, tag = "101")]
+        Dense(super::DenseVector),
+        /// Sparse vector
+        #[prost(message, tag = "102")]
+        Sparse(super::SparseVector),
+        /// Multi dense vector
+        #[prost(message, tag = "103")]
+        MultiDense(super::MultiDenseVector),
+        #[prost(message, tag = "104")]
+        Document(super::Document),
+        #[prost(message, tag = "105")]
+        Image(super::Image),
+        #[prost(message, tag = "106")]
+        Object(super::InferenceObject),
+    }
+}
+#[derive(serde::Serialize)]
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct VectorOutput {
+    /// Vector data (flatten for multi vectors), deprecated
+    #[prost(float, repeated, tag = "1")]
+    pub data: ::prost::alloc::vec::Vec<f32>,
+    /// Sparse indices for sparse vectors, deprecated
+    #[prost(message, optional, tag = "2")]
+    pub indices: ::core::option::Option<SparseIndices>,
+    /// Number of vectors per multi vector, deprecated
+    #[prost(uint32, optional, tag = "3")]
+    pub vectors_count: ::core::option::Option<u32>,
+    #[prost(oneof = "vector_output::Vector", tags = "101, 102, 103")]
+    pub vector: ::core::option::Option<vector_output::Vector>,
+}
+/// Nested message and enum types in `VectorOutput`.
+pub mod vector_output {
+    #[derive(serde::Serialize)]
+    #[allow(clippy::derive_partial_eq_without_eq)]
+    #[derive(Clone, PartialEq, ::prost::Oneof)]
+    pub enum Vector {
+        /// Dense vector
+        #[prost(message, tag = "101")]
+        Dense(super::DenseVector),
+        /// Sparse vector
+        #[prost(message, tag = "102")]
+        Sparse(super::SparseVector),
+        /// Multi dense vector
+        #[prost(message, tag = "103")]
+        MultiDense(super::MultiDenseVector),
+    }
 }
 #[derive(serde::Serialize)]
 #[allow(clippy::derive_partial_eq_without_eq)]
@@ -3867,7 +3970,7 @@ pub struct MultiDenseVector {
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct VectorInput {
-    #[prost(oneof = "vector_input::Variant", tags = "1, 2, 3, 4")]
+    #[prost(oneof = "vector_input::Variant", tags = "1, 2, 3, 4, 5, 6, 7")]
     pub variant: ::core::option::Option<vector_input::Variant>,
 }
 /// Nested message and enum types in `VectorInput`.
@@ -3884,6 +3987,12 @@ pub mod vector_input {
         Sparse(super::SparseVector),
         #[prost(message, tag = "4")]
         MultiDense(super::MultiDenseVector),
+        #[prost(message, tag = "5")]
+        Document(super::Document),
+        #[prost(message, tag = "6")]
+        Image(super::Image),
+        #[prost(message, tag = "7")]
+        Object(super::InferenceObject),
     }
 }
 #[derive(serde::Serialize)]
@@ -4192,6 +4301,16 @@ pub struct NamedVectors {
     #[validate(nested)]
     pub vectors: ::std::collections::HashMap<::prost::alloc::string::String, Vector>,
 }
+#[derive(serde::Serialize)]
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct NamedVectorsOutput {
+    #[prost(map = "string, message", tag = "1")]
+    pub vectors: ::std::collections::HashMap<
+        ::prost::alloc::string::String,
+        VectorOutput,
+    >,
+}
 #[derive(validator::Validate)]
 #[derive(serde::Serialize)]
 #[allow(clippy::derive_partial_eq_without_eq)]
@@ -4211,6 +4330,25 @@ pub mod vectors {
         Vector(super::Vector),
         #[prost(message, tag = "2")]
         Vectors(super::NamedVectors),
+    }
+}
+#[derive(serde::Serialize)]
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct VectorsOutput {
+    #[prost(oneof = "vectors_output::VectorsOptions", tags = "1, 2")]
+    pub vectors_options: ::core::option::Option<vectors_output::VectorsOptions>,
+}
+/// Nested message and enum types in `VectorsOutput`.
+pub mod vectors_output {
+    #[derive(serde::Serialize)]
+    #[allow(clippy::derive_partial_eq_without_eq)]
+    #[derive(Clone, PartialEq, ::prost::Oneof)]
+    pub enum VectorsOptions {
+        #[prost(message, tag = "1")]
+        Vector(super::VectorOutput),
+        #[prost(message, tag = "2")]
+        Vectors(super::NamedVectorsOutput),
     }
 }
 #[derive(serde::Serialize)]
@@ -5432,7 +5570,7 @@ pub struct ScoredPoint {
     pub version: u64,
     /// Vectors to search
     #[prost(message, optional, tag = "6")]
-    pub vectors: ::core::option::Option<Vectors>,
+    pub vectors: ::core::option::Option<VectorsOutput>,
     /// Shard key
     #[prost(message, optional, tag = "7")]
     pub shard_key: ::core::option::Option<ShardKey>,
@@ -5495,6 +5633,8 @@ pub struct SearchResponse {
     /// Time spent to process
     #[prost(double, tag = "2")]
     pub time: f64,
+    #[prost(message, optional, tag = "3")]
+    pub usage: ::core::option::Option<HardwareUsage>,
 }
 #[derive(serde::Serialize)]
 #[allow(clippy::derive_partial_eq_without_eq)]
@@ -5505,6 +5645,8 @@ pub struct QueryResponse {
     /// Time spent to process
     #[prost(double, tag = "2")]
     pub time: f64,
+    #[prost(message, optional, tag = "3")]
+    pub usage: ::core::option::Option<HardwareUsage>,
 }
 #[derive(serde::Serialize)]
 #[allow(clippy::derive_partial_eq_without_eq)]
@@ -5515,6 +5657,8 @@ pub struct QueryBatchResponse {
     /// Time spent to process
     #[prost(double, tag = "2")]
     pub time: f64,
+    #[prost(message, optional, tag = "3")]
+    pub usage: ::core::option::Option<HardwareUsage>,
 }
 #[derive(serde::Serialize)]
 #[allow(clippy::derive_partial_eq_without_eq)]
@@ -5525,6 +5669,8 @@ pub struct QueryGroupsResponse {
     /// Time spent to process
     #[prost(double, tag = "2")]
     pub time: f64,
+    #[prost(message, optional, tag = "3")]
+    pub usage: ::core::option::Option<HardwareUsage>,
 }
 #[derive(serde::Serialize)]
 #[allow(clippy::derive_partial_eq_without_eq)]
@@ -5542,6 +5688,8 @@ pub struct SearchBatchResponse {
     /// Time spent to process
     #[prost(double, tag = "2")]
     pub time: f64,
+    #[prost(message, optional, tag = "3")]
+    pub usage: ::core::option::Option<HardwareUsage>,
 }
 #[derive(serde::Serialize)]
 #[allow(clippy::derive_partial_eq_without_eq)]
@@ -5552,6 +5700,8 @@ pub struct SearchGroupsResponse {
     /// Time spent to process
     #[prost(double, tag = "2")]
     pub time: f64,
+    #[prost(message, optional, tag = "3")]
+    pub usage: ::core::option::Option<HardwareUsage>,
 }
 #[derive(serde::Serialize)]
 #[allow(clippy::derive_partial_eq_without_eq)]
@@ -5562,6 +5712,8 @@ pub struct CountResponse {
     /// Time spent to process
     #[prost(double, tag = "2")]
     pub time: f64,
+    #[prost(message, optional, tag = "3")]
+    pub usage: ::core::option::Option<HardwareUsage>,
 }
 #[derive(serde::Serialize)]
 #[allow(clippy::derive_partial_eq_without_eq)]
@@ -5592,7 +5744,7 @@ pub struct RetrievedPoint {
     #[prost(map = "string, message", tag = "2")]
     pub payload: ::std::collections::HashMap<::prost::alloc::string::String, Value>,
     #[prost(message, optional, tag = "4")]
-    pub vectors: ::core::option::Option<Vectors>,
+    pub vectors: ::core::option::Option<VectorsOutput>,
     /// Shard key
     #[prost(message, optional, tag = "5")]
     pub shard_key: ::core::option::Option<ShardKey>,
@@ -5619,6 +5771,8 @@ pub struct RecommendResponse {
     /// Time spent to process
     #[prost(double, tag = "2")]
     pub time: f64,
+    #[prost(message, optional, tag = "3")]
+    pub usage: ::core::option::Option<HardwareUsage>,
 }
 #[derive(serde::Serialize)]
 #[allow(clippy::derive_partial_eq_without_eq)]
@@ -5629,6 +5783,8 @@ pub struct RecommendBatchResponse {
     /// Time spent to process
     #[prost(double, tag = "2")]
     pub time: f64,
+    #[prost(message, optional, tag = "3")]
+    pub usage: ::core::option::Option<HardwareUsage>,
 }
 #[derive(serde::Serialize)]
 #[allow(clippy::derive_partial_eq_without_eq)]
@@ -5639,6 +5795,8 @@ pub struct DiscoverResponse {
     /// Time spent to process
     #[prost(double, tag = "2")]
     pub time: f64,
+    #[prost(message, optional, tag = "3")]
+    pub usage: ::core::option::Option<HardwareUsage>,
 }
 #[derive(serde::Serialize)]
 #[allow(clippy::derive_partial_eq_without_eq)]
@@ -5649,6 +5807,8 @@ pub struct DiscoverBatchResponse {
     /// Time spent to process
     #[prost(double, tag = "2")]
     pub time: f64,
+    #[prost(message, optional, tag = "3")]
+    pub usage: ::core::option::Option<HardwareUsage>,
 }
 #[derive(serde::Serialize)]
 #[allow(clippy::derive_partial_eq_without_eq)]
@@ -5659,6 +5819,8 @@ pub struct RecommendGroupsResponse {
     /// Time spent to process
     #[prost(double, tag = "2")]
     pub time: f64,
+    #[prost(message, optional, tag = "3")]
+    pub usage: ::core::option::Option<HardwareUsage>,
 }
 #[derive(serde::Serialize)]
 #[allow(clippy::derive_partial_eq_without_eq)]
@@ -5689,6 +5851,8 @@ pub struct SearchMatrixPairsResponse {
     /// Time spent to process
     #[prost(double, tag = "2")]
     pub time: f64,
+    #[prost(message, optional, tag = "3")]
+    pub usage: ::core::option::Option<HardwareUsage>,
 }
 #[derive(serde::Serialize)]
 #[allow(clippy::derive_partial_eq_without_eq)]
@@ -5699,6 +5863,8 @@ pub struct SearchMatrixOffsetsResponse {
     /// Time spent to process
     #[prost(double, tag = "2")]
     pub time: f64,
+    #[prost(message, optional, tag = "3")]
+    pub usage: ::core::option::Option<HardwareUsage>,
 }
 #[derive(validator::Validate)]
 #[derive(serde::Serialize)]
@@ -5735,7 +5901,7 @@ pub struct MinShould {
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct Condition {
-    #[prost(oneof = "condition::ConditionOneOf", tags = "1, 2, 3, 4, 5, 6")]
+    #[prost(oneof = "condition::ConditionOneOf", tags = "1, 2, 3, 4, 5, 6, 7")]
     #[validate(nested)]
     pub condition_one_of: ::core::option::Option<condition::ConditionOneOf>,
 }
@@ -5757,6 +5923,8 @@ pub mod condition {
         IsNull(super::IsNullCondition),
         #[prost(message, tag = "6")]
         Nested(super::NestedCondition),
+        #[prost(message, tag = "7")]
+        HasVector(super::HasVectorCondition),
     }
 }
 #[derive(serde::Serialize)]
@@ -5779,6 +5947,13 @@ pub struct IsNullCondition {
 pub struct HasIdCondition {
     #[prost(message, repeated, tag = "1")]
     pub has_id: ::prost::alloc::vec::Vec<PointId>,
+}
+#[derive(serde::Serialize)]
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct HasVectorCondition {
+    #[prost(string, tag = "1")]
+    pub has_vector: ::prost::alloc::string::String,
 }
 #[derive(validator::Validate)]
 #[derive(serde::Serialize)]
@@ -6017,6 +6192,13 @@ pub struct GeoPoint {
     pub lon: f64,
     #[prost(double, tag = "2")]
     pub lat: f64,
+}
+#[derive(serde::Serialize)]
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct HardwareUsage {
+    #[prost(uint64, tag = "1")]
+    pub cpu: u64,
 }
 #[derive(serde::Serialize)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
@@ -9243,6 +9425,8 @@ pub struct QueryBatchResponseInternal {
     /// Time spent to process
     #[prost(double, tag = "2")]
     pub time: f64,
+    #[prost(message, optional, tag = "5")]
+    pub usage: ::core::option::Option<HardwareUsage>,
 }
 #[derive(serde::Serialize)]
 #[derive(validator::Validate)]

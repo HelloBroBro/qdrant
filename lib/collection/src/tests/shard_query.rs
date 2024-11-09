@@ -1,7 +1,8 @@
 use std::sync::Arc;
 
+use common::counter::hardware_accumulator::HwMeasurementAcc;
 use common::cpu::CpuBudget;
-use segment::data_types::vectors::{NamedVectorStruct, Vector, DEFAULT_VECTOR_NAME};
+use segment::data_types::vectors::{NamedVectorStruct, VectorInternal, DEFAULT_VECTOR_NAME};
 use segment::types::{PointIdType, WithPayloadInterface, WithVector};
 use tempfile::Builder;
 use tokio::runtime::Handle;
@@ -10,7 +11,7 @@ use tokio::sync::RwLock;
 use crate::operations::query_enum::QueryEnum;
 use crate::operations::types::CollectionError;
 use crate::operations::universal_query::shard_query::{
-    Fusion, ScoringQuery, ShardPrefetch, ShardQueryRequest,
+    FusionInternal, ScoringQuery, ShardPrefetch, ShardQueryRequest,
 };
 use crate::save_on_disk::SaveOnDisk;
 use crate::shards::local_shard::LocalShard;
@@ -54,7 +55,7 @@ async fn test_shard_query_rrf_rescoring() {
     // RRF query without prefetches
     let query = ShardQueryRequest {
         prefetches: vec![],
-        query: Some(ScoringQuery::Fusion(Fusion::Rrf)),
+        query: Some(ScoringQuery::Fusion(FusionInternal::Rrf)),
         filter: None,
         score_threshold: None,
         limit: 0,
@@ -65,7 +66,12 @@ async fn test_shard_query_rrf_rescoring() {
     };
 
     let sources_scores = shard
-        .query_batch(Arc::new(vec![query]), &current_runtime, None)
+        .query_batch(
+            Arc::new(vec![query]),
+            &current_runtime,
+            None,
+            HwMeasurementAcc::new(),
+        )
         .await;
     let expected_error =
         CollectionError::bad_request("cannot apply Fusion without prefetches".to_string());
@@ -73,7 +79,7 @@ async fn test_shard_query_rrf_rescoring() {
 
     // RRF query with single prefetch
     let nearest_query = QueryEnum::Nearest(NamedVectorStruct::new_from_vector(
-        Vector::Dense(vec![1.0, 2.0, 3.0, 4.0]),
+        VectorInternal::Dense(vec![1.0, 2.0, 3.0, 4.0]),
         DEFAULT_VECTOR_NAME,
     ));
     let inner_limit = 3;
@@ -88,7 +94,7 @@ async fn test_shard_query_rrf_rescoring() {
     let outer_limit = 2;
     let query = ShardQueryRequest {
         prefetches: vec![nearest_query_prefetch.clone()],
-        query: Some(ScoringQuery::Fusion(Fusion::Rrf)),
+        query: Some(ScoringQuery::Fusion(FusionInternal::Rrf)),
         filter: None,
         score_threshold: None,
         limit: outer_limit,
@@ -99,7 +105,12 @@ async fn test_shard_query_rrf_rescoring() {
     };
 
     let sources_scores = shard
-        .query_batch(Arc::new(vec![query]), &current_runtime, None)
+        .query_batch(
+            Arc::new(vec![query]),
+            &current_runtime,
+            None,
+            HwMeasurementAcc::new(),
+        )
         .await
         .unwrap()
         .pop()
@@ -134,7 +145,7 @@ async fn test_shard_query_rrf_rescoring() {
             nearest_query_prefetch.clone(),
             nearest_query_prefetch.clone(),
         ],
-        query: Some(ScoringQuery::Fusion(Fusion::Rrf)),
+        query: Some(ScoringQuery::Fusion(FusionInternal::Rrf)),
         filter: None,
         score_threshold: None,
         limit: outer_limit,
@@ -145,7 +156,12 @@ async fn test_shard_query_rrf_rescoring() {
     };
 
     let sources_scores = shard
-        .query_batch(Arc::new(vec![query]), &current_runtime, None)
+        .query_batch(
+            Arc::new(vec![query]),
+            &current_runtime,
+            None,
+            HwMeasurementAcc::new(),
+        )
         .await
         .unwrap()
         .pop()
@@ -177,7 +193,7 @@ async fn test_shard_query_rrf_rescoring() {
                 ..nearest_query_prefetch.clone()
             },
         ],
-        query: Some(ScoringQuery::Fusion(Fusion::Rrf)),
+        query: Some(ScoringQuery::Fusion(FusionInternal::Rrf)),
         filter: None,
         score_threshold: None,
         limit: outer_limit,
@@ -188,7 +204,12 @@ async fn test_shard_query_rrf_rescoring() {
     };
 
     let sources_scores = shard
-        .query_batch(Arc::new(vec![query]), &current_runtime, None)
+        .query_batch(
+            Arc::new(vec![query]),
+            &current_runtime,
+            None,
+            HwMeasurementAcc::new(),
+        )
         .await
         .unwrap()
         .pop()
@@ -237,7 +258,7 @@ async fn test_shard_query_vector_rescoring() {
     shard.update(upsert_ops.into(), true).await.unwrap();
 
     let nearest_query = QueryEnum::Nearest(NamedVectorStruct::new_from_vector(
-        Vector::Dense(vec![1.0, 2.0, 3.0, 4.0]),
+        VectorInternal::Dense(vec![1.0, 2.0, 3.0, 4.0]),
         DEFAULT_VECTOR_NAME,
     ));
     let inner_limit = 3;
@@ -266,7 +287,12 @@ async fn test_shard_query_vector_rescoring() {
     };
 
     let sources_scores = shard
-        .query_batch(Arc::new(vec![query]), &current_runtime, None)
+        .query_batch(
+            Arc::new(vec![query]),
+            &current_runtime,
+            None,
+            HwMeasurementAcc::new(),
+        )
         .await
         .unwrap()
         .pop()
@@ -292,7 +318,12 @@ async fn test_shard_query_vector_rescoring() {
     };
 
     let sources_scores = shard
-        .query_batch(Arc::new(vec![query]), &current_runtime, None)
+        .query_batch(
+            Arc::new(vec![query]),
+            &current_runtime,
+            None,
+            HwMeasurementAcc::new(),
+        )
         .await
         .unwrap()
         .pop()
@@ -321,7 +352,12 @@ async fn test_shard_query_vector_rescoring() {
     };
 
     let sources_scores = shard
-        .query_batch(Arc::new(vec![query]), &current_runtime, None)
+        .query_batch(
+            Arc::new(vec![query]),
+            &current_runtime,
+            None,
+            HwMeasurementAcc::new(),
+        )
         .await
         .unwrap()
         .pop()
@@ -369,7 +405,7 @@ async fn test_shard_query_payload_vector() {
     shard.update(upsert_ops.into(), true).await.unwrap();
 
     let nearest_query = QueryEnum::Nearest(NamedVectorStruct::new_from_vector(
-        Vector::Dense(vec![1.0, 2.0, 3.0, 4.0]),
+        VectorInternal::Dense(vec![1.0, 2.0, 3.0, 4.0]),
         DEFAULT_VECTOR_NAME,
     ));
 
@@ -388,7 +424,12 @@ async fn test_shard_query_payload_vector() {
     };
 
     let sources_scores = shard
-        .query_batch(Arc::new(vec![query]), &current_runtime, None)
+        .query_batch(
+            Arc::new(vec![query]),
+            &current_runtime,
+            None,
+            HwMeasurementAcc::new(),
+        )
         .await
         .unwrap()
         .pop()

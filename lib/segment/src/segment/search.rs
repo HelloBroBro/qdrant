@@ -4,6 +4,8 @@ use super::Segment;
 use crate::common::operation_error::{OperationError, OperationResult};
 use crate::data_types::named_vectors::NamedVectors;
 #[cfg(feature = "testing")]
+use crate::data_types::query_context::QueryContext;
+#[cfg(feature = "testing")]
 use crate::data_types::vectors::QueryVector;
 #[cfg(feature = "testing")]
 use crate::entry::entry_point::SegmentEntry;
@@ -96,6 +98,9 @@ impl Segment {
         top: usize,
         params: Option<&SearchParams>,
     ) -> OperationResult<Vec<ScoredPoint>> {
+        let query_context = QueryContext::default();
+        let segment_query_context = query_context.get_segment_query_context();
+
         let result = self.search_batch(
             vector_name,
             &[vector],
@@ -104,8 +109,13 @@ impl Segment {
             filter,
             top,
             params,
-            Default::default(),
+            &segment_query_context,
         )?;
+
+        // This function is only for testing and no measurements are needed.
+        segment_query_context
+            .take_hardware_counter()
+            .discard_results();
 
         Ok(result.into_iter().next().unwrap())
     }

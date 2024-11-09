@@ -37,7 +37,7 @@ impl ShardReplicaSet {
         let local = self.local.read().await;
 
         if let Some(local_shard) = local.deref() {
-            match self.peer_state(&self.this_peer_id()) {
+            match self.peer_state(self.this_peer_id()) {
                 Some(
                     ReplicaState::Active
                     | ReplicaState::Partial
@@ -100,7 +100,9 @@ impl ShardReplicaSet {
                 .map_err(|err| {
                     if err.is_transient() {
                         // Deactivate the peer if forwarding failed with transient error
-                        self.add_locally_disabled(&self.replica_state.read(), leader_peer);
+                        let replica_state = self.replica_state.read();
+                        let from_state = replica_state.get_peer_state(leader_peer);
+                        self.add_locally_disabled(&replica_state, leader_peer, from_state);
 
                         // Return service error
                         CollectionError::service_error(format!(
@@ -129,7 +131,7 @@ impl ShardReplicaSet {
 
         peer_ids
             .into_iter()
-            .filter(|peer_id| self.peer_is_active_or_resharding(peer_id)) // re-acquire replica_state read lock
+            .filter(|&peer_id| self.peer_is_active_or_resharding(peer_id)) // re-acquire replica_state read lock
             .max()
     }
 
@@ -200,19 +202,20 @@ impl ShardReplicaSet {
 
         let remotes = self.remotes.read().await;
         let local = self.local.read().await;
+        let replica_count = usize::from(local.is_some()) + remotes.len();
 
         let this_peer_id = self.this_peer_id();
 
-        // target all remote peers that can receive updates
-        let active_remote_shards: Vec<_> = remotes
+        // Target all remote peers that can receive updates
+        let updatable_remote_shards: Vec<_> = remotes
             .iter()
-            .filter(|rs| self.peer_is_active_or_pending(&rs.peer_id))
+            .filter(|rs| self.is_peer_updatable(rs.peer_id))
             .collect();
 
-        // local is defined AND the peer itself can receive updates
-        let local_is_updatable = local.is_some() && self.peer_is_active_or_pending(&this_peer_id);
+        // Local is defined and can receive updates
+        let local_is_updatable = local.is_some() && self.is_peer_updatable(this_peer_id);
 
-        if active_remote_shards.is_empty() && !local_is_updatable {
+        if updatable_remote_shards.is_empty() && !local_is_updatable {
             return Err(CollectionError::service_error(format!(
                 "The replica set for shard {} on peer {this_peer_id} has no active replica",
                 self.shard_id,
@@ -223,11 +226,11 @@ impl ShardReplicaSet {
         let clock_tag = ClockTag::new(this_peer_id, clock.id() as _, current_clock_tick);
         let operation = OperationWithClockTag::new(operation, Some(clock_tag));
 
-        let mut update_futures = Vec::with_capacity(active_remote_shards.len() + 1);
+        let mut update_futures = Vec::with_capacity(updatable_remote_shards.len() + 1);
 
         if let Some(local) = local.deref() {
-            if self.peer_is_active_or_pending(&this_peer_id) {
-                let local_wait = if self.peer_state(&this_peer_id) == Some(ReplicaState::Listener) {
+            if self.is_peer_updatable(this_peer_id) {
+                let local_wait = if self.peer_state(this_peer_id) == Some(ReplicaState::Listener) {
                     false
                 } else {
                     wait
@@ -248,7 +251,7 @@ impl ShardReplicaSet {
             }
         }
 
-        for remote in active_remote_shards {
+        for remote in updatable_remote_shards {
             let operation = operation.clone();
 
             let remote_update = async move {
@@ -276,8 +279,6 @@ impl ShardReplicaSet {
         drop(remotes);
         drop(local);
 
-        let total_results = all_res.len();
-
         let write_consistency_factor = self
             .collection_config
             .read()
@@ -286,7 +287,7 @@ impl ShardReplicaSet {
             .write_consistency_factor
             .get() as usize;
 
-        let minimal_success_count = write_consistency_factor.min(total_results);
+        let minimal_success_count = write_consistency_factor.min(replica_count);
 
         let (successes, failures): (Vec<_>, Vec<_>) = all_res.into_iter().partition_result();
 
@@ -377,7 +378,7 @@ impl ShardReplicaSet {
             self.handle_failed_replicas(
                 failures
                     .iter()
-                    .filter(|(peer_id, _)| self.peer_is_resharding(peer_id)),
+                    .filter(|(peer_id, _)| self.peer_is_resharding(*peer_id)),
                 &self.replica_state.read(),
                 update_only_existing,
             );
@@ -389,7 +390,7 @@ impl ShardReplicaSet {
 
         if !successes
             .iter()
-            .any(|(peer_id, _)| self.peer_is_active_or_resharding(peer_id))
+            .any(|&(peer_id, _)| self.peer_is_active_or_resharding(peer_id))
         {
             return Err(CollectionError::service_error(format!(
                 "Failed to apply operation to at least one `Active` replica. \
@@ -414,22 +415,25 @@ impl ShardReplicaSet {
         Ok(Some(res))
     }
 
-    fn peer_is_active_or_pending(&self, peer_id: &PeerId) -> bool {
+    /// Whether to send updates to the given peer
+    ///
+    /// A peer in dead state, or a locally disabled peer, will not accept updates.
+    fn is_peer_updatable(&self, peer_id: PeerId) -> bool {
         let res = match self.peer_state(peer_id) {
             Some(ReplicaState::Active) => true,
             Some(ReplicaState::Partial) => true,
             Some(ReplicaState::Initializing) => true,
-            Some(ReplicaState::Dead) => false,
             Some(ReplicaState::Listener) => true,
-            Some(ReplicaState::PartialSnapshot) => false,
-            Some(ReplicaState::Recovery) => false,
+            // We must not send updates to replicas in recovery state.
+            // If we do we might create gaps in WAL clock tags.
+            Some(ReplicaState::Recovery | ReplicaState::PartialSnapshot) => false,
             Some(ReplicaState::Resharding) => true,
-            None => false,
+            Some(ReplicaState::Dead) | None => false,
         };
         res && !self.is_locally_disabled(peer_id)
     }
 
-    fn peer_is_resharding(&self, peer_id: &PeerId) -> bool {
+    fn peer_is_resharding(&self, peer_id: PeerId) -> bool {
         self.peer_state(peer_id) == Some(ReplicaState::Resharding)
             && !self.is_locally_disabled(peer_id)
     }
@@ -449,20 +453,24 @@ impl ShardReplicaSet {
                 self.shard_id,
             );
 
-            let Some(&peer_state) = state.get_peer_state(peer_id) else {
+            let Some(peer_state) = state.get_peer_state(*peer_id) else {
                 continue;
             };
 
+            // Ignore errors entirely for dead and listener replicas
             match peer_state {
-                ReplicaState::Active | ReplicaState::Initializing | ReplicaState::Resharding => (),
-                _ => continue,
+                ReplicaState::Dead | ReplicaState::Listener => continue,
+                ReplicaState::Active
+                | ReplicaState::Initializing
+                | ReplicaState::Partial
+                | ReplicaState::Recovery
+                | ReplicaState::PartialSnapshot
+                | ReplicaState::Resharding => (),
             }
 
-            if matches!(peer_state, ReplicaState::Partial | ReplicaState::Resharding)
-                && err.is_pre_condition_failed()
-            {
-                // Handles a special case where transfer receiver haven't created a shard yet.
-                // In this case update should be handled by source shard and forward proxy.
+            // Handle a special case where transfer receiver is not in the expected replica state yet.
+            // Data consistency will be handled by the shard transfer and the associated proxies.
+            if peer_state.is_partial_or_recovery() && err.is_pre_condition_failed() {
                 continue;
             }
 
@@ -481,10 +489,14 @@ impl ShardReplicaSet {
             log::debug!(
                 "Deactivating peer {peer_id} because of failed update of shard {}:{}",
                 self.collection_id,
-                self.shard_id
+                self.shard_id,
             );
 
-            self.add_locally_disabled(state, *peer_id);
+            // Deactivate replica in consensus if it matches the state we expect
+            // Always deactivate the replica if its in a shard transfer related state
+            let from_state = Some(peer_state).filter(|state| !state.is_partial_or_recovery());
+
+            self.add_locally_disabled(state, *peer_id, from_state);
         }
 
         wait_for_deactivation
@@ -537,7 +549,7 @@ mod tests {
     use crate::operations::vector_params_builder::VectorParamsBuilder;
     use crate::optimizers_builder::OptimizersConfig;
     use crate::save_on_disk::SaveOnDisk;
-    use crate::shards::replica_set::{AbortShardTransfer, ChangePeerState};
+    use crate::shards::replica_set::{AbortShardTransfer, ChangePeerFromState};
 
     #[tokio::test]
     async fn test_highest_replica_peer_id() {
@@ -548,10 +560,10 @@ mod tests {
         // at build time the replicas are all dead, they need to be activated
         assert_eq!(rs.highest_alive_replica_peer_id(), None);
 
-        rs.set_replica_state(&1, ReplicaState::Active).unwrap();
-        rs.set_replica_state(&3, ReplicaState::Active).unwrap();
-        rs.set_replica_state(&4, ReplicaState::Active).unwrap();
-        rs.set_replica_state(&5, ReplicaState::Partial).unwrap();
+        rs.set_replica_state(1, ReplicaState::Active).unwrap();
+        rs.set_replica_state(3, ReplicaState::Active).unwrap();
+        rs.set_replica_state(4, ReplicaState::Active).unwrap();
+        rs.set_replica_state(5, ReplicaState::Partial).unwrap();
 
         assert_eq!(rs.highest_replica_peer_id(), Some(5));
         assert_eq!(rs.highest_alive_replica_peer_id(), Some(4));
@@ -624,8 +636,8 @@ mod tests {
         .unwrap()
     }
 
-    fn dummy_on_replica_failure() -> ChangePeerState {
-        Arc::new(move |_peer_id, _shard_id| {})
+    fn dummy_on_replica_failure() -> ChangePeerFromState {
+        Arc::new(move |_peer_id, _shard_id, _from_state| {})
     }
 
     fn dummy_abort_shard_transfer() -> AbortShardTransfer {

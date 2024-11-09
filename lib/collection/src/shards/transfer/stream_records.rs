@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use common::counter::hardware_accumulator::HwMeasurementAcc;
 use parking_lot::Mutex;
 
 use super::transfer_tasks_pool::TransferTaskProgress;
@@ -37,7 +38,7 @@ pub(super) async fn transfer_stream_records(
     {
         let shard_holder = shard_holder.read().await;
 
-        let Some(replica_set) = shard_holder.get_shard(&shard_id) else {
+        let Some(replica_set) = shard_holder.get_shard(shard_id) else {
             return Err(CollectionError::service_error(format!(
                 "Shard {shard_id} cannot be proxied because it does not exist"
             )));
@@ -54,6 +55,7 @@ pub(super) async fn transfer_stream_records(
                     exact: true,
                 }),
                 None, // no timeout
+                HwMeasurementAcc::new(),
             )
             .await?
         else {
@@ -74,7 +76,7 @@ pub(super) async fn transfer_stream_records(
     loop {
         let shard_holder = shard_holder.read().await;
 
-        let Some(replica_set) = shard_holder.get_shard(&shard_id) else {
+        let Some(replica_set) = shard_holder.get_shard(shard_id) else {
             // Forward proxy gone?!
             // That would be a programming error.
             return Err(CollectionError::service_error(format!(
@@ -103,7 +105,7 @@ pub(super) async fn transfer_stream_records(
     // Update cutoff point on remote shard, disallow recovery before our current last seen
     {
         let shard_holder = shard_holder.read().await;
-        let Some(replica_set) = shard_holder.get_shard(&shard_id) else {
+        let Some(replica_set) = shard_holder.get_shard(shard_id) else {
             // Forward proxy gone?!
             // That would be a programming error.
             return Err(CollectionError::service_error(format!(

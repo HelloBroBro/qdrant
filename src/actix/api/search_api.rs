@@ -6,6 +6,7 @@ use collection::operations::shard_selector_internal::ShardSelectorInternal;
 use collection::operations::types::{
     CoreSearchRequest, SearchGroupsRequest, SearchRequest, SearchRequestBatch,
 };
+use common::counter::hardware_accumulator::HwMeasurementAcc;
 use futures::TryFutureExt;
 use itertools::Itertools;
 use storage::content_manager::collection_verification::{
@@ -21,6 +22,7 @@ use crate::actix::helpers::{self, process_response, process_response_error};
 use crate::common::points::{
     do_core_search_points, do_search_batch_points, do_search_point_groups, do_search_points_matrix,
 };
+use crate::settings::ServiceConfig;
 
 #[post("/collections/{name}/points/search")]
 async fn search_points(
@@ -28,6 +30,7 @@ async fn search_points(
     collection: Path<CollectionPath>,
     request: Json<SearchRequest>,
     params: Query<ReadParams>,
+    service_config: web::Data<ServiceConfig>,
     ActixAccess(access): ActixAccess,
 ) -> HttpResponse {
     let SearchRequest {
@@ -53,7 +56,9 @@ async fn search_points(
         Some(shard_keys) => shard_keys.into(),
     };
 
-    helpers::time(
+    let hw_measurement_acc = HwMeasurementAcc::new();
+
+    helpers::time_and_hardware_opt(
         do_core_search_points(
             dispatcher.toc(&access, &pass),
             &collection.name,
@@ -62,6 +67,7 @@ async fn search_points(
             shard_selection,
             access,
             params.timeout(),
+            hw_measurement_acc.clone(),
         )
         .map_ok(|scored_points| {
             scored_points
@@ -69,6 +75,8 @@ async fn search_points(
                 .map(api::rest::ScoredPoint::from)
                 .collect_vec()
         }),
+        hw_measurement_acc,
+        service_config.hardware_reporting(),
     )
     .await
 }
@@ -79,6 +87,7 @@ async fn batch_search_points(
     collection: Path<CollectionPath>,
     request: Json<SearchRequestBatch>,
     params: Query<ReadParams>,
+    service_config: web::Data<ServiceConfig>,
     ActixAccess(access): ActixAccess,
 ) -> HttpResponse {
     let requests = request
@@ -113,7 +122,9 @@ async fn batch_search_points(
         Err(err) => return process_response_error(err, Instant::now()),
     };
 
-    helpers::time(
+    let hw_measurement_acc = HwMeasurementAcc::new();
+
+    helpers::time_and_hardware_opt(
         do_search_batch_points(
             dispatcher.toc(&access, &pass),
             &collection.name,
@@ -121,6 +132,7 @@ async fn batch_search_points(
             params.consistency,
             access,
             params.timeout(),
+            hw_measurement_acc.clone(),
         )
         .map_ok(|batch_scored_points| {
             batch_scored_points
@@ -133,6 +145,8 @@ async fn batch_search_points(
                 })
                 .collect_vec()
         }),
+        hw_measurement_acc,
+        service_config.hardware_reporting(),
     )
     .await
 }
@@ -143,6 +157,7 @@ async fn search_point_groups(
     collection: Path<CollectionPath>,
     request: Json<SearchGroupsRequest>,
     params: Query<ReadParams>,
+    service_config: web::Data<ServiceConfig>,
     ActixAccess(access): ActixAccess,
 ) -> HttpResponse {
     let SearchGroupsRequest {
@@ -168,15 +183,22 @@ async fn search_point_groups(
         Some(shard_keys) => shard_keys.into(),
     };
 
-    helpers::time(do_search_point_groups(
-        dispatcher.toc(&access, &pass),
-        &collection.name,
-        search_group_request,
-        params.consistency,
-        shard_selection,
-        access,
-        params.timeout(),
-    ))
+    let hw_measurement_acc = HwMeasurementAcc::new();
+
+    helpers::time_and_hardware_opt(
+        do_search_point_groups(
+            dispatcher.toc(&access, &pass),
+            &collection.name,
+            search_group_request,
+            params.consistency,
+            shard_selection,
+            access,
+            params.timeout(),
+            hw_measurement_acc.clone(),
+        ),
+        hw_measurement_acc,
+        service_config.hardware_reporting(),
+    )
     .await
 }
 
@@ -186,6 +208,7 @@ async fn search_points_matrix_pairs(
     collection: Path<CollectionPath>,
     request: Json<SearchMatrixRequest>,
     params: Query<ReadParams>,
+    service_config: web::Data<ServiceConfig>,
     ActixAccess(access): ActixAccess,
 ) -> impl Responder {
     let timing = Instant::now();
@@ -213,6 +236,8 @@ async fn search_points_matrix_pairs(
         Some(shard_keys) => shard_keys.into(),
     };
 
+    let hw_measurement_acc = HwMeasurementAcc::new();
+
     let response = do_search_points_matrix(
         dispatcher.toc(&access, &pass),
         &collection.name,
@@ -221,11 +246,16 @@ async fn search_points_matrix_pairs(
         shard_selection,
         access,
         params.timeout(),
+        hw_measurement_acc.clone(),
     )
     .await
     .map(SearchMatrixPairsResponse::from);
 
-    process_response(response, timing)
+    let hw_measurements = service_config
+        .hardware_reporting()
+        .then_some(hw_measurement_acc);
+
+    process_response(response, timing, hw_measurements)
 }
 
 #[post("/collections/{name}/points/search/matrix/offsets")]
@@ -234,6 +264,7 @@ async fn search_points_matrix_offsets(
     collection: Path<CollectionPath>,
     request: Json<SearchMatrixRequest>,
     params: Query<ReadParams>,
+    service_config: web::Data<ServiceConfig>,
     ActixAccess(access): ActixAccess,
 ) -> impl Responder {
     let timing = Instant::now();
@@ -261,6 +292,8 @@ async fn search_points_matrix_offsets(
         Some(shard_keys) => shard_keys.into(),
     };
 
+    let hw_measurement_acc = HwMeasurementAcc::new();
+
     let response = do_search_points_matrix(
         dispatcher.toc(&access, &pass),
         &collection.name,
@@ -269,11 +302,16 @@ async fn search_points_matrix_offsets(
         shard_selection,
         access,
         params.timeout(),
+        hw_measurement_acc.clone(),
     )
     .await
     .map(SearchMatrixOffsetsResponse::from);
 
-    process_response(response, timing)
+    let hw_measurements = service_config
+        .hardware_reporting()
+        .then_some(hw_measurement_acc);
+
+    process_response(response, timing, hw_measurements)
 }
 
 // Configure services

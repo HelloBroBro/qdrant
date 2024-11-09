@@ -3,6 +3,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use common::counter::hardware_accumulator::HwMeasurementAcc;
 use common::tar_ext;
 use common::types::TelemetryDetail;
 use segment::data_types::facets::{FacetParams, FacetResponse};
@@ -18,11 +19,12 @@ use super::shard::ShardId;
 use super::update_tracker::UpdateTracker;
 use crate::hash_ring::HashRingRouter;
 use crate::operations::point_ops::{
-    PointInsertOperationsInternal, PointOperations, PointStruct, PointSyncOperation,
+    PointInsertOperationsInternal, PointOperations, PointStructPersisted, PointSyncOperation,
 };
 use crate::operations::types::{
     CollectionError, CollectionInfo, CollectionResult, CoreSearchRequestBatch,
-    CountRequestInternal, CountResult, PointRequestInternal, Record, UpdateResult, UpdateStatus,
+    CountRequestInternal, CountResult, PointRequestInternal, RecordInternal, UpdateResult,
+    UpdateStatus,
 };
 use crate::operations::universal_query::shard_query::{ShardQueryRequest, ShardQueryResponse};
 use crate::operations::{
@@ -145,7 +147,7 @@ impl ForwardProxyShard {
             Some(batch.pop().unwrap().id)
         };
 
-        let points: Result<Vec<PointStruct>, String> = batch
+        let points: Result<Vec<PointStructPersisted>, String> = batch
             .into_iter()
             // If using a hashring filter, only transfer points that moved, otherwise transfer all
             .filter(|point| {
@@ -153,7 +155,7 @@ impl ForwardProxyShard {
                     .map(|hashring| hashring.is_in_shard(&point.id, self.remote_shard.id))
                     .unwrap_or(true)
             })
-            .map(|point| point.try_into())
+            .map(PointStructPersisted::try_from)
             .collect();
 
         let points = points?;
@@ -328,7 +330,7 @@ impl ShardOperation for ForwardProxyShard {
         search_runtime_handle: &Handle,
         order_by: Option<&OrderBy>,
         timeout: Option<Duration>,
-    ) -> CollectionResult<Vec<Record>> {
+    ) -> CollectionResult<Vec<RecordInternal>> {
         let local_shard = &self.wrapped_shard;
         local_shard
             .scroll_by(
@@ -353,10 +355,11 @@ impl ShardOperation for ForwardProxyShard {
         request: Arc<CoreSearchRequestBatch>,
         search_runtime_handle: &Handle,
         timeout: Option<Duration>,
+        hw_measurement_acc: HwMeasurementAcc,
     ) -> CollectionResult<Vec<Vec<ScoredPoint>>> {
         let local_shard = &self.wrapped_shard;
         local_shard
-            .core_search(request, search_runtime_handle, timeout)
+            .core_search(request, search_runtime_handle, timeout, hw_measurement_acc)
             .await
     }
 
@@ -365,10 +368,11 @@ impl ShardOperation for ForwardProxyShard {
         request: Arc<CountRequestInternal>,
         search_runtime_handle: &Handle,
         timeout: Option<Duration>,
+        hw_measurement_acc: HwMeasurementAcc,
     ) -> CollectionResult<CountResult> {
         let local_shard = &self.wrapped_shard;
         local_shard
-            .count(request, search_runtime_handle, timeout)
+            .count(request, search_runtime_handle, timeout, hw_measurement_acc)
             .await
     }
 
@@ -379,7 +383,7 @@ impl ShardOperation for ForwardProxyShard {
         with_vector: &WithVector,
         search_runtime_handle: &Handle,
         timeout: Option<Duration>,
-    ) -> CollectionResult<Vec<Record>> {
+    ) -> CollectionResult<Vec<RecordInternal>> {
         let local_shard = &self.wrapped_shard;
         local_shard
             .retrieve(
@@ -397,10 +401,11 @@ impl ShardOperation for ForwardProxyShard {
         requests: Arc<Vec<ShardQueryRequest>>,
         search_runtime_handle: &Handle,
         timeout: Option<Duration>,
+        hw_measurement_acc: HwMeasurementAcc,
     ) -> CollectionResult<Vec<ShardQueryResponse>> {
         let local_shard = &self.wrapped_shard;
         local_shard
-            .query_batch(requests, search_runtime_handle, timeout)
+            .query_batch(requests, search_runtime_handle, timeout, hw_measurement_acc)
             .await
     }
 

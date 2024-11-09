@@ -10,6 +10,7 @@ use storage::types::StorageConfig;
 use validator::Validate;
 
 use crate::common::debugger::DebuggerConfig;
+use crate::common::inference::config::InferenceConfig;
 use crate::tracing;
 
 const DEFAULT_CONFIG: &str = include_str!("../config/config.yaml");
@@ -49,6 +50,16 @@ pub struct ServiceConfig {
 
     /// How much time is considered too long for a query to execute.
     pub slow_query_secs: Option<f32>,
+
+    /// Whether to enable reporting of measured hardware utilization in API responses.
+    #[serde(default)]
+    pub hardware_reporting: Option<bool>,
+}
+
+impl ServiceConfig {
+    pub fn hardware_reporting(&self) -> bool {
+        self.hardware_reporting.unwrap_or_default()
+    }
 }
 
 #[derive(Debug, Deserialize, Clone, Default, Validate)]
@@ -103,6 +114,9 @@ pub struct ConsensusConfig {
     #[validate(range(min = 1))]
     #[serde(default = "default_message_timeout_tics")]
     pub message_timeout_ticks: u64,
+    #[allow(dead_code)] // `schema_generator` complains about this 🙄
+    #[serde(default)]
+    pub compact_wal_entries: u64, // compact WAL when it grows to enough applied entries
 }
 
 impl Default for ConsensusConfig {
@@ -112,6 +126,7 @@ impl Default for ConsensusConfig {
             tick_period_ms: default_tick_period_ms(),
             bootstrap_timeout_sec: default_bootstrap_timeout_sec(),
             message_timeout_ticks: default_message_timeout_tics(),
+            compact_wal_entries: 0,
         }
     }
 }
@@ -151,6 +166,8 @@ pub struct Settings {
     /// We therefore need to log these messages later, after the logger is ready.
     #[serde(default, skip)]
     pub load_errors: Vec<LogMsg>,
+    #[serde(default)]
+    pub inference: Option<InferenceConfig>,
 }
 
 impl Settings {

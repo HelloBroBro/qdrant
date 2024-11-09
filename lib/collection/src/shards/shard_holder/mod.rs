@@ -7,10 +7,9 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use bytes::Bytes;
 use common::cpu::CpuBudget;
 use common::tar_ext::BuilderExt;
-use futures::{Future, Stream, TryStreamExt as _};
+use futures::{Future, TryStreamExt as _};
 use itertools::Itertools;
 use segment::common::validate_snapshot_archive::open_snapshot_archive_with_validation;
 use segment::types::{ShardKey, SnapshotFormat};
@@ -19,11 +18,12 @@ use tokio::sync::{broadcast, OwnedRwLockReadGuard, RwLock};
 use tokio_util::codec::{BytesCodec, FramedRead};
 use tokio_util::io::SyncIoBridge;
 
-use super::replica_set::AbortShardTransfer;
+use super::replica_set::{AbortShardTransfer, ChangePeerFromState};
 use super::resharding::tasks_pool::ReshardTasksPool;
 use super::resharding::{ReshardStage, ReshardState};
 use super::transfer::transfer_tasks_pool::TransferTasksPool;
 use crate::collection::payload_index_schema::PayloadIndexSchema;
+use crate::common::snapshot_stream::SnapshotStream;
 use crate::config::{CollectionConfig, ShardingMethod};
 use crate::hash_ring::HashRingRouter;
 use crate::operations::cluster_ops::ReshardingDirection;
@@ -38,7 +38,7 @@ use crate::optimizers_builder::OptimizersConfig;
 use crate::save_on_disk::SaveOnDisk;
 use crate::shards::channel_service::ChannelService;
 use crate::shards::local_shard::LocalShard;
-use crate::shards::replica_set::{ChangePeerState, ReplicaState, ShardReplicaSet}; // TODO rename ReplicaShard to ReplicaSetShard
+use crate::shards::replica_set::{ReplicaState, ShardReplicaSet};
 use crate::shards::shard::{PeerId, ShardId};
 use crate::shards::shard_config::{ShardConfig, ShardType};
 use crate::shards::shard_versioning::latest_shard_paths;
@@ -146,7 +146,7 @@ impl ShardHolder {
 
     pub fn remove_shard_from_key_mapping(
         &mut self,
-        shard_id: &ShardId,
+        shard_id: ShardId,
         shard_key: &ShardKey,
     ) -> Result<(), CollectionError> {
         self.key_mapping.write_optional(|key_mapping| {
@@ -155,10 +155,10 @@ impl ShardHolder {
             }
 
             let mut key_mapping = key_mapping.clone();
-            key_mapping.get_mut(shard_key).unwrap().remove(shard_id);
+            key_mapping.get_mut(shard_key).unwrap().remove(&shard_id);
             Some(key_mapping)
         })?;
-        self.shard_id_to_key_mapping.remove(shard_id);
+        self.shard_id_to_key_mapping.remove(&shard_id);
 
         Ok(())
     }
@@ -272,16 +272,16 @@ impl ShardHolder {
         Ok(())
     }
 
-    pub fn contains_shard(&self, shard_id: &ShardId) -> bool {
-        self.shards.contains_key(shard_id)
+    pub fn contains_shard(&self, shard_id: ShardId) -> bool {
+        self.shards.contains_key(&shard_id)
     }
 
-    pub fn get_shard(&self, shard_id: &ShardId) -> Option<&ShardReplicaSet> {
-        self.shards.get(shard_id)
+    pub fn get_shard(&self, shard_id: ShardId) -> Option<&ShardReplicaSet> {
+        self.shards.get(&shard_id)
     }
 
-    pub fn get_shards(&self) -> impl Iterator<Item = (&ShardId, &ShardReplicaSet)> {
-        self.shards.iter()
+    pub fn get_shards(&self) -> impl Iterator<Item = (ShardId, &ShardReplicaSet)> {
+        self.shards.iter().map(|(id, shard)| (*id, shard))
     }
 
     pub fn all_shards(&self) -> impl Iterator<Item = &ShardReplicaSet> {
@@ -414,12 +414,12 @@ impl ShardHolder {
     ///
     /// This only includes shard transfers that are in consensus for the current collection. A
     /// shard transfer that has just been proposed may not be included yet.
-    pub fn count_shard_transfer_io(&self, peer_id: &PeerId) -> (usize, usize) {
+    pub fn count_shard_transfer_io(&self, peer_id: PeerId) -> (usize, usize) {
         let (mut incoming, mut outgoing) = (0, 0);
 
         for transfer in self.shard_transfers.read().iter() {
-            incoming += usize::from(transfer.to == *peer_id);
-            outgoing += usize::from(transfer.from == *peer_id);
+            incoming += usize::from(transfer.to == peer_id);
+            outgoing += usize::from(transfer.from == peer_id);
         }
 
         (incoming, outgoing)
@@ -477,13 +477,9 @@ impl ShardHolder {
         Some(resharding_operations)
     }
 
-    pub fn get_related_transfers(
-        &self,
-        shard_id: &ShardId,
-        peer_id: &PeerId,
-    ) -> Vec<ShardTransfer> {
+    pub fn get_related_transfers(&self, shard_id: ShardId, peer_id: PeerId) -> Vec<ShardTransfer> {
         self.get_transfers(|transfer| {
-            transfer.shard_id == *shard_id && (transfer.from == *peer_id || transfer.to == *peer_id)
+            transfer.shard_id == shard_id && (transfer.from == peer_id || transfer.to == peer_id)
         })
     }
 
@@ -573,7 +569,7 @@ impl ShardHolder {
         shared_storage_config: Arc<SharedStorageConfig>,
         payload_index_schema: Arc<SaveOnDisk<PayloadIndexSchema>>,
         channel_service: ChannelService,
-        on_peer_failure: ChangePeerState,
+        on_peer_failure: ChangePeerFromState,
         abort_shard_transfer: AbortShardTransfer,
         this_peer_id: PeerId,
         update_runtime: Handle,
@@ -700,11 +696,11 @@ impl ShardHolder {
                 let is_local =
                     replica_set.this_peer_id() == local_peer_id && replica_set.is_local().await;
                 let is_initializing =
-                    replica_set.peer_state(&local_peer_id) == Some(ReplicaState::Initializing);
+                    replica_set.peer_state(local_peer_id) == Some(ReplicaState::Initializing);
                 if not_distributed && is_local && is_initializing {
                     log::warn!("Local shard {collection_id}:{} stuck in Initializing state, changing to Active", replica_set.shard_id);
                     replica_set
-                        .set_replica_state(&local_peer_id, ReplicaState::Active)
+                        .set_replica_state(local_peer_id, ReplicaState::Active)
                         .expect("Failed to set local shard state");
                 }
                 let shard_key = shard_id_to_key_mapping.get(&shard_id).cloned();
@@ -718,8 +714,8 @@ impl ShardHolder {
         }
     }
 
-    pub async fn assert_shard_exists(&self, shard_id: ShardId) -> CollectionResult<()> {
-        match self.get_shard(&shard_id) {
+    pub fn assert_shard_exists(&self, shard_id: ShardId) -> CollectionResult<()> {
+        match self.get_shard(shard_id) {
             Some(_) => Ok(()),
             None => Err(shard_not_found_error(shard_id)),
         }
@@ -727,7 +723,7 @@ impl ShardHolder {
 
     async fn assert_shard_is_local(&self, shard_id: ShardId) -> CollectionResult<()> {
         let is_local_shard = self
-            .is_shard_local(&shard_id)
+            .is_shard_local(shard_id)
             .await
             .ok_or_else(|| shard_not_found_error(shard_id))?;
 
@@ -745,7 +741,7 @@ impl ShardHolder {
         shard_id: ShardId,
     ) -> CollectionResult<()> {
         let is_local_shard = self
-            .is_shard_local_or_queue_proxy(&shard_id)
+            .is_shard_local_or_queue_proxy(shard_id)
             .await
             .ok_or_else(|| shard_not_found_error(shard_id))?;
 
@@ -759,7 +755,7 @@ impl ShardHolder {
     }
 
     /// Returns true if shard is explicitly local, false otherwise.
-    pub async fn is_shard_local(&self, shard_id: &ShardId) -> Option<bool> {
+    pub async fn is_shard_local(&self, shard_id: ShardId) -> Option<bool> {
         match self.get_shard(shard_id) {
             Some(shard) => Some(shard.is_local().await),
             None => None,
@@ -767,7 +763,7 @@ impl ShardHolder {
     }
 
     /// Returns true if shard is explicitly local or is queue proxy shard, false otherwise.
-    pub async fn is_shard_local_or_queue_proxy(&self, shard_id: &ShardId) -> Option<bool> {
+    pub async fn is_shard_local_or_queue_proxy(&self, shard_id: ShardId) -> Option<bool> {
         match self.get_shard(shard_id) {
             Some(shard) => Some(shard.is_local().await || shard.is_queue_proxy().await),
             None => None,
@@ -779,7 +775,7 @@ impl ShardHolder {
         let mut res = Vec::with_capacity(1);
         for (shard_id, replica_set) in self.get_shards() {
             if replica_set.has_local_shard().await {
-                res.push(*shard_id);
+                res.push(shard_id);
             }
         }
         res
@@ -788,7 +784,7 @@ impl ShardHolder {
     /// Count how many shard replicas are on the given peer.
     pub fn count_peer_shards(&self, peer_id: PeerId) -> usize {
         self.get_shards()
-            .filter(|(_, replica_set)| replica_set.peer_state(&peer_id).is_some())
+            .filter(|(_, replica_set)| replica_set.peer_state(peer_id).is_some())
             .count()
     }
 
@@ -819,8 +815,8 @@ impl ShardHolder {
             .collect()
     }
 
-    pub fn get_outgoing_transfers(&self, current_peer_id: &PeerId) -> Vec<ShardTransfer> {
-        self.get_transfers(|transfer| transfer.from == *current_peer_id)
+    pub fn get_outgoing_transfers(&self, current_peer_id: PeerId) -> Vec<ShardTransfer> {
+        self.get_transfers(|transfer| transfer.from == current_peer_id)
     }
 
     /// # Cancel safety
@@ -835,12 +831,8 @@ impl ShardHolder {
 
         let snapshots_path = Self::snapshots_path_for_shard_unchecked(snapshots_path, shard_id);
 
-        if !snapshots_path.exists() {
-            return Ok(Vec::new());
-        }
-
         let shard = self
-            .get_shard(&shard_id)
+            .get_shard(shard_id)
             .ok_or_else(|| shard_not_found_error(shard_id))?;
         let snapshot_manager = shard.get_snapshots_storage_manager()?;
         snapshot_manager.list_snapshots(&snapshots_path).await
@@ -860,7 +852,7 @@ impl ShardHolder {
         //   and would be deleted, if future is cancelled
 
         let shard = self
-            .get_shard(&shard_id)
+            .get_shard(shard_id)
             .ok_or_else(|| shard_not_found_error(shard_id))?;
 
         if !shard.is_local().await && !shard.is_queue_proxy().await {
@@ -925,7 +917,7 @@ impl ShardHolder {
         collection_name: &str,
         shard_id: ShardId,
         temp_dir: &Path,
-    ) -> CollectionResult<impl Stream<Item = std::io::Result<Bytes>>> {
+    ) -> CollectionResult<SnapshotStream> {
         // - `snapshot_temp_dir` and `temp_file` are handled by `tempfile`
         //   and would be deleted, if future is cancelled
 
@@ -971,7 +963,10 @@ impl ShardHolder {
             CollectionResult::Ok(())
         });
 
-        Ok(FramedRead::new(read_half, BytesCodec::new()).map_ok(|bytes| bytes.freeze()))
+        Ok(SnapshotStream::new_stream(
+            FramedRead::new(read_half, BytesCodec::new()).map_ok(|bytes| bytes.freeze()),
+            Some(snapshot_file_name),
+        ))
     }
 
     /// # Cancel safety
@@ -988,7 +983,7 @@ impl ShardHolder {
         temp_dir: &Path,
         cancel: cancel::CancellationToken,
     ) -> CollectionResult<()> {
-        if !self.contains_shard(&shard_id) {
+        if !self.contains_shard(shard_id) {
             return Err(shard_not_found_error(shard_id));
         }
 
@@ -1066,7 +1061,7 @@ impl ShardHolder {
         //   (see `VectorsConfig::check_compatible_with_segment_config`)
 
         let replica_set = self
-            .get_shard(&shard_id)
+            .get_shard(shard_id)
             .ok_or_else(|| shard_not_found_error(shard_id))?;
 
         // `ShardReplicaSet::restore_local_replica_from` is *not* cancel safe

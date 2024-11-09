@@ -18,11 +18,12 @@ use crate::data_types::facets::{FacetParams, FacetValue};
 use crate::data_types::named_vectors::NamedVectors;
 use crate::data_types::order_by::{OrderBy, OrderValue};
 use crate::data_types::query_context::{QueryContext, SegmentQueryContext};
-use crate::data_types::vectors::{QueryVector, Vector};
+use crate::data_types::vectors::{QueryVector, VectorInternal};
 use crate::entry::entry_point::SegmentEntry;
 use crate::index::field_index::{CardinalityEstimation, FieldIndex};
 use crate::index::{PayloadIndex, VectorIndex};
 use crate::json_path::JsonPath;
+use crate::payload_storage::PayloadStorage;
 use crate::segment::{
     DB_BACKUP_PATH, PAYLOAD_DB_BACKUP_PATH, SEGMENT_STATE_FILE, SNAPSHOT_FILES_PATH, SNAPSHOT_PATH,
 };
@@ -58,7 +59,7 @@ impl SegmentEntry for Segment {
         filter: Option<&Filter>,
         top: usize,
         params: Option<&SearchParams>,
-        query_context: SegmentQueryContext,
+        query_context: &SegmentQueryContext,
     ) -> OperationResult<Vec<Vec<ScoredPoint>>> {
         check_query_vectors(vector_name, query_vectors, &self.segment_config)?;
         let vector_data = &self.vector_data[vector_name];
@@ -176,11 +177,11 @@ impl SegmentEntry for Segment {
             }),
             Some(internal_id) => {
                 self.handle_point_version_and_failure(op_num, Some(internal_id), |segment| {
-                    let vector_data = segment.vector_data.get(vector_name).ok_or(
+                    let vector_data = segment.vector_data.get(vector_name).ok_or_else(|| {
                         OperationError::VectorNameNotExists {
                             received_name: vector_name.to_string(),
-                        },
-                    )?;
+                        }
+                    })?;
                     let mut vector_storage = vector_data.vector_storage.borrow_mut();
                     let is_deleted = vector_storage.delete_vector(internal_id)?;
                     Ok((is_deleted, Some(internal_id)))
@@ -273,7 +274,11 @@ impl SegmentEntry for Segment {
         })
     }
 
-    fn vector(&self, vector_name: &str, point_id: PointIdType) -> OperationResult<Option<Vector>> {
+    fn vector(
+        &self,
+        vector_name: &str,
+        point_id: PointIdType,
+    ) -> OperationResult<Option<VectorInternal>> {
         check_vector_name(vector_name, &self.segment_config)?;
         let internal_id = self.lookup_internal_id(point_id)?;
         let vector_opt = self.vector_by_offset(vector_name, internal_id)?;
@@ -385,7 +390,7 @@ impl SegmentEntry for Segment {
         Ok(self.vector_data[vector_name]
             .vector_storage
             .borrow()
-            .available_size_in_bytes())
+            .size_in_bytes())
     }
 
     fn estimate_point_count<'a>(&'a self, filter: Option<&'a Filter>) -> CardinalityEstimation {
@@ -444,7 +449,9 @@ impl SegmentEntry for Segment {
             .map(|data| data.vector_storage.borrow().available_vector_count())
             .sum();
 
-        let vector_data_info = self
+        let mut vectors_size_bytes: usize = 0;
+
+        let vector_data_info: HashMap<_, _> = self
             .vector_data
             .iter()
             .map(|(key, vector_data)| {
@@ -452,6 +459,9 @@ impl SegmentEntry for Segment {
                 let num_vectors = vector_storage.available_vector_count();
                 let vector_index = vector_data.vector_index.borrow();
                 let is_indexed = vector_index.is_index();
+
+                vectors_size_bytes += vector_storage.size_in_bytes();
+
                 let vector_data_info = VectorDataInfo {
                     num_vectors,
                     num_indexed_vectors: if is_indexed {
@@ -480,7 +490,8 @@ impl SegmentEntry for Segment {
             num_indexed_vectors,
             num_points: self.available_point_count(),
             num_deleted_vectors: self.deleted_point_count(),
-            ram_usage_bytes: 0,  // ToDo: Implement
+            vectors_size_bytes, // Considers vector storage, but not payload or indices
+            ram_usage_bytes: 0, // ToDo: Implement
             disk_usage_bytes: 0, // ToDo: Implement
             is_appendable: self.appendable_flag,
             index_schema: schema,
@@ -855,6 +866,10 @@ fn snapshot_files(
     }
 
     for file in segment.payload_index.borrow().files() {
+        tar.blocking_append_file(&file, strip_prefix(&file, &segment.current_path)?)?;
+    }
+
+    for file in segment.payload_storage.borrow().files() {
         tar.blocking_append_file(&file, strip_prefix(&file, &segment.current_path)?)?;
     }
 

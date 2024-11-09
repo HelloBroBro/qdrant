@@ -251,8 +251,7 @@ impl PlainIndex {
         let vector_storage = self.vector_storage.borrow();
         let available_vector_count = vector_storage.available_vector_count();
         if available_vector_count > 0 {
-            let vector_size_bytes =
-                vector_storage.available_size_in_bytes() / available_vector_count;
+            let vector_size_bytes = vector_storage.size_in_bytes() / available_vector_count;
             let indexing_threshold_bytes = search_optimized_threshold_kb * BYTES_IN_KB;
 
             if let Some(payload_filter) = filter {
@@ -300,7 +299,7 @@ impl VectorIndex for PlainIndex {
                 let filtered_ids_vec = payload_index.query_points(filter);
                 let deleted_points = query_context
                     .deleted_points()
-                    .unwrap_or(id_tracker.deleted_point_bitslice());
+                    .unwrap_or_else(|| id_tracker.deleted_point_bitslice());
                 vectors
                     .iter()
                     .map(|&vector| {
@@ -311,7 +310,10 @@ impl VectorIndex for PlainIndex {
                             &is_stopped,
                         )
                         .map(|scorer| {
-                            scorer.peek_top_iter(&mut filtered_ids_vec.iter().copied(), top)
+                            let res =
+                                scorer.peek_top_iter(&mut filtered_ids_vec.iter().copied(), top);
+                            query_context.apply_hardware_counter(scorer.take_hardware_counter());
+                            res
                         })
                     })
                     .collect()
@@ -322,7 +324,7 @@ impl VectorIndex for PlainIndex {
                 let id_tracker = self.id_tracker.borrow();
                 let deleted_points = query_context
                     .deleted_points()
-                    .unwrap_or(id_tracker.deleted_point_bitslice());
+                    .unwrap_or_else(|| id_tracker.deleted_point_bitslice());
                 vectors
                     .iter()
                     .map(|&vector| {
@@ -332,7 +334,11 @@ impl VectorIndex for PlainIndex {
                             deleted_points,
                             &is_stopped,
                         )
-                        .map(|scorer| scorer.peek_top_all(top))
+                        .map(|scorer| {
+                            let res = scorer.peek_top_all(top);
+                            query_context.apply_hardware_counter(scorer.take_hardware_counter());
+                            res
+                        })
                     })
                     .collect()
             }

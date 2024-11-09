@@ -1,6 +1,7 @@
 use std::borrow::Cow;
 use std::marker::PhantomData;
 
+use common::counter::hardware_counter::HardwareCounterCell;
 use common::types::{PointOffsetType, ScoreType};
 
 use crate::data_types::primitive::PrimitiveVectorElement;
@@ -23,6 +24,8 @@ pub struct CustomQueryScorer<
     metric: PhantomData<TMetric>,
     _input_query: PhantomData<TInputQuery>,
     _element: PhantomData<TElement>,
+    hardware_counter: HardwareCounterCell,
+    dim: usize,
 }
 
 impl<
@@ -35,8 +38,10 @@ impl<
     > CustomQueryScorer<'a, TElement, TMetric, TVectorStorage, TInputQuery, TStoredQuery>
 {
     pub fn new(query: TInputQuery, vector_storage: &'a TVectorStorage) -> Self {
+        let mut dim = 0;
         let query = query
             .transform(|vector| {
+                dim = vector.len();
                 let preprocessed_vector = TMetric::preprocess(vector);
                 Ok(TypedDenseVector::from(TElement::slice_from_float_cow(
                     Cow::from(preprocessed_vector),
@@ -50,7 +55,30 @@ impl<
             metric: PhantomData,
             _input_query: PhantomData,
             _element: PhantomData,
+            hardware_counter: HardwareCounterCell::new(),
+            dim,
         }
+    }
+}
+
+impl<
+        'a,
+        TElement: PrimitiveVectorElement,
+        TMetric: Metric<TElement>,
+        TVectorStorage: DenseVectorStorage<TElement>,
+        TInputQuery: Query<DenseVector>,
+        TStoredQuery: Query<TypedDenseVector<TElement>>,
+    > CustomQueryScorer<'a, TElement, TMetric, TVectorStorage, TInputQuery, TStoredQuery>
+{
+    fn hardware_counter_finalized(&self) -> HardwareCounterCell {
+        let mut counter = self.hardware_counter.take();
+
+        // Calculate the dimension multiplier here to improve performance of measuring.
+        counter
+            .cpu_counter_mut()
+            .multiplied_mut(self.dim * size_of::<TElement>());
+
+        counter
     }
 }
 
@@ -72,11 +100,19 @@ impl<
 
     #[inline]
     fn score(&self, against: &[TElement]) -> ScoreType {
-        self.query
-            .score_by(|example| TMetric::similarity(example, against))
+        let cpu_counter = self.hardware_counter.cpu_counter();
+
+        self.query.score_by(|example| {
+            cpu_counter.incr();
+            TMetric::similarity(example, against)
+        })
     }
 
     fn score_internal(&self, _point_a: PointOffsetType, _point_b: PointOffsetType) -> ScoreType {
         unimplemented!("Custom scorer can compare against multiple vectors, not just one")
+    }
+
+    fn take_hardware_counter(&self) -> HardwareCounterCell {
+        self.hardware_counter_finalized()
     }
 }

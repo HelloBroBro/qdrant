@@ -10,8 +10,7 @@ use std::sync::Arc;
 
 use common::types::ScoreType;
 use fnv::FnvBuildHasher;
-use geo::prelude::HaversineDistance;
-use geo::{Contains, Coord, LineString, Point, Polygon};
+use geo::{Contains, Coord, Distance as GeoDistance, Haversine, LineString, Point, Polygon};
 use indexmap::IndexSet;
 use itertools::Itertools;
 use merge::Merge;
@@ -328,6 +327,7 @@ pub struct SegmentInfo {
     pub num_points: usize,
     pub num_indexed_vectors: usize,
     pub num_deleted_vectors: usize,
+    pub vectors_size_bytes: usize,
     pub ram_usage_bytes: usize,
     pub disk_usage_bytes: usize,
     pub is_appendable: bool,
@@ -1751,7 +1751,7 @@ pub struct GeoRadius {
 impl GeoRadius {
     pub fn check_point(&self, point: &GeoPoint) -> bool {
         let query_center = Point::new(self.center.lon, self.center.lat);
-        query_center.haversine_distance(&Point::new(point.lon, point.lat)) < self.radius
+        Haversine::distance(query_center, Point::new(point.lon, point.lat)) < self.radius
     }
 }
 
@@ -2035,6 +2035,18 @@ pub struct HasIdCondition {
     pub has_id: HashSet<PointIdType>,
 }
 
+/// Filter points which have specific vector assigned
+#[derive(Debug, Deserialize, Serialize, JsonSchema, Clone, PartialEq, Eq)]
+pub struct HasVectorCondition {
+    pub has_vector: String,
+}
+
+impl From<String> for HasVectorCondition {
+    fn from(vector: String) -> Self {
+        HasVectorCondition { has_vector: vector }
+    }
+}
+
 impl From<HashSet<PointIdType>> for HasIdCondition {
     fn from(set: HashSet<PointIdType>) -> Self {
         HasIdCondition { has_id: set }
@@ -2088,6 +2100,8 @@ pub enum Condition {
     IsNull(IsNullCondition),
     /// Check if points id is in a given set
     HasId(HasIdCondition),
+    /// Check if point has vector assigned
+    HasVector(HasVectorCondition),
     /// Nested filters
     Nested(NestedCondition),
     /// Nested filter
@@ -2104,6 +2118,7 @@ impl PartialEq for Condition {
             (Self::IsEmpty(this), Self::IsEmpty(other)) => this == other,
             (Self::IsNull(this), Self::IsNull(other)) => this == other,
             (Self::HasId(this), Self::HasId(other)) => this == other,
+            (Self::HasVector(this), Self::HasVector(other)) => this == other,
             (Self::Nested(this), Self::Nested(other)) => this == other,
             (Self::Filter(this), Self::Filter(other)) => this == other,
             (Self::CustomIdChecker(_), Self::CustomIdChecker(_)) => false,
@@ -2124,7 +2139,10 @@ impl Condition {
 impl Validate for Condition {
     fn validate(&self) -> Result<(), ValidationErrors> {
         match self {
-            Condition::HasId(_) | Condition::IsEmpty(_) | Condition::IsNull(_) => Ok(()),
+            Condition::HasId(_)
+            | Condition::IsEmpty(_)
+            | Condition::IsNull(_)
+            | Condition::HasVector(_) => Ok(()),
             Condition::Field(field_condition) => field_condition.validate(),
             Condition::Nested(nested_condition) => nested_condition.validate(),
             Condition::Filter(filter) => filter.validate(),

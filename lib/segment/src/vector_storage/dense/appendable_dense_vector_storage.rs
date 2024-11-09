@@ -79,14 +79,14 @@ impl<T: PrimitiveVectorElement, S: ChunkedVectorStorage<T>> VectorStorage
     }
 
     fn is_on_disk(&self) -> bool {
-        true
+        self.vectors.is_on_disk()
     }
 
     fn total_vector_count(&self) -> usize {
         self.vectors.len()
     }
 
-    fn available_size_in_bytes(&self) -> usize {
+    fn size_in_bytes(&self) -> usize {
         self.available_vector_count() * self.vector_dim() * std::mem::size_of::<T>()
     }
 

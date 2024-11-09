@@ -362,18 +362,16 @@ pub(crate) fn create_vector_index(
     stopped: &AtomicBool,
 ) -> OperationResult<VectorIndexEnum> {
     let vector_index = match &vector_config.index {
-        Indexes::Plain {} => VectorIndexEnum::Plain(PlainIndex::new(
-            id_tracker.clone(),
-            vector_storage.clone(),
-            payload_index.clone(),
-        )),
+        Indexes::Plain {} => {
+            VectorIndexEnum::Plain(PlainIndex::new(id_tracker, vector_storage, payload_index))
+        }
         Indexes::Hnsw(vector_hnsw_config) => {
             let args = HnswIndexOpenArgs {
                 path: vector_index_path,
-                id_tracker: id_tracker.clone(),
-                vector_storage: vector_storage.clone(),
-                quantized_vectors: quantized_vectors.clone(),
-                payload_index: payload_index.clone(),
+                id_tracker,
+                vector_storage,
+                quantized_vectors,
+                payload_index,
                 hnsw_config: vector_hnsw_config.clone(),
                 permit,
                 stopped,
@@ -479,18 +477,10 @@ fn create_segment(
         ))
     };
 
-    let payload_index_path = get_payload_index_path(segment_path);
-    let payload_index: Arc<AtomicRefCell<StructPayloadIndex>> = sp(StructPayloadIndex::open(
-        payload_storage,
-        id_tracker.clone(),
-        &payload_index_path,
-        appendable_flag,
-    )?);
+    let mut vector_storages = HashMap::new();
 
-    let mut vector_data = HashMap::new();
     for (vector_name, vector_config) in &config.vector_data {
         let vector_storage_path = get_vector_storage_path(segment_path, vector_name);
-        let vector_index_path = get_vector_index_path(segment_path, vector_name);
 
         // Select suitable vector storage type based on configuration
         let vector_storage = Arc::new(AtomicRefCell::new(open_vector_storage(
@@ -501,6 +491,34 @@ fn create_segment(
             vector_name,
         )?));
 
+        vector_storages.insert(vector_name.to_owned(), vector_storage);
+    }
+
+    for vector_name in config.sparse_vector_data.keys() {
+        let vector_storage = sp(create_sparse_vector_storage(
+            database.clone(),
+            vector_name,
+            stopped,
+        )?);
+
+        vector_storages.insert(vector_name.to_owned(), vector_storage);
+    }
+
+    let payload_index_path = get_payload_index_path(segment_path);
+    let payload_index: Arc<AtomicRefCell<StructPayloadIndex>> = sp(StructPayloadIndex::open(
+        payload_storage.clone(),
+        id_tracker.clone(),
+        vector_storages.clone(),
+        &payload_index_path,
+        appendable_flag,
+    )?);
+
+    let mut vector_data = HashMap::new();
+    for (vector_name, vector_config) in &config.vector_data {
+        let vector_storage_path = get_vector_storage_path(segment_path, vector_name);
+        let vector_storage = vector_storages.remove(vector_name).unwrap();
+
+        let vector_index_path = get_vector_index_path(segment_path, vector_name);
         // Warn when number of points between ID tracker and storage differs
         let point_count = id_tracker.borrow().total_point_count();
         let vector_count = vector_storage.borrow().total_vector_count();
@@ -550,12 +568,7 @@ fn create_segment(
     for (vector_name, sparse_vector_config) in &config.sparse_vector_data {
         let vector_storage_path = get_vector_storage_path(segment_path, vector_name);
         let vector_index_path = get_vector_index_path(segment_path, vector_name);
-
-        let vector_storage = sp(create_sparse_vector_storage(
-            database.clone(),
-            vector_name,
-            stopped,
-        )?);
+        let vector_storage = vector_storages.remove(vector_name).unwrap();
 
         // Warn when number of points between ID tracker and storage differs
         let point_count = id_tracker.borrow().total_point_count();
@@ -604,6 +617,7 @@ fn create_segment(
         segment_type,
         appendable_flag,
         payload_index,
+        payload_storage,
         segment_config: config.clone(),
         error_status: None,
         database,

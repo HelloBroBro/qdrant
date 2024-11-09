@@ -2,12 +2,12 @@ use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
 
+use common::counter::hardware_accumulator::HwMeasurementAcc;
 use futures::stream::FuturesUnordered;
 use futures::{future, StreamExt as _, TryFutureExt, TryStreamExt as _};
 use itertools::Itertools;
 use segment::data_types::order_by::{Direction, OrderBy};
 use segment::types::{ShardKey, WithPayload, WithPayloadInterface};
-use validator::Validate as _;
 
 use super::Collection;
 use crate::operations::consistency_params::ReadConsistency;
@@ -92,7 +92,7 @@ impl Collection {
         let result = tokio::task::spawn(async move {
             let _update_lock = update_lock;
 
-            let Some(shard) = shard_holder.get_shard(&shard_selection) else {
+            let Some(shard) = shard_holder.get_shard(shard_selection) else {
                 return Ok(None);
             };
 
@@ -137,8 +137,6 @@ impl Collection {
         ordering: WriteOrdering,
         shard_keys_selection: Option<ShardKey>,
     ) -> CollectionResult<UpdateResult> {
-        operation.validate()?;
-
         let update_lock = self.updates_lock.clone().read_owned().await;
         let shard_holder = self.shards_holder.clone().read_owned().await;
 
@@ -379,6 +377,7 @@ impl Collection {
         read_consistency: Option<ReadConsistency>,
         shard_selection: &ShardSelectorInternal,
         timeout: Option<Duration>,
+        hw_measurement_acc: HwMeasurementAcc,
     ) -> CollectionResult<CountResult> {
         let shards_holder = self.shards_holder.read().await;
         let shards = shards_holder.select_shards(shard_selection)?;
@@ -394,6 +393,7 @@ impl Collection {
                     read_consistency,
                     timeout,
                     shard_selection.is_shard_id(),
+                    hw_measurement_acc.clone(),
                 )
             })
             .collect();
@@ -412,7 +412,7 @@ impl Collection {
         read_consistency: Option<ReadConsistency>,
         shard_selection: &ShardSelectorInternal,
         timeout: Option<Duration>,
-    ) -> CollectionResult<Vec<Record>> {
+    ) -> CollectionResult<Vec<RecordInternal>> {
         let with_payload_interface = request
             .with_payload
             .as_ref()

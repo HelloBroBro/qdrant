@@ -8,10 +8,11 @@ use std::time::SystemTimeError;
 
 use api::grpc::transport_channel_pool::RequestError;
 use api::rest::{
-    BaseGroupRequest, LookupLocation, OrderByInterface, RecommendStrategy,
-    SearchGroupsRequestInternal, SearchRequestInternal, ShardKeySelector, VectorStruct,
+    BaseGroupRequest, LookupLocation, OrderByInterface, RecommendStrategy, Record,
+    SearchGroupsRequestInternal, SearchRequestInternal, ShardKeySelector, VectorStructOutput,
 };
 use common::defaults;
+use common::ext::OptionExt;
 use common::types::ScoreType;
 use common::validation::validate_range_generic;
 use io::file_operations::FileStorageError;
@@ -47,6 +48,7 @@ use super::ClockTag;
 use crate::config::{CollectionConfig, CollectionParams};
 use crate::operations::cluster_ops::ReshardingDirection;
 use crate::operations::config_diff::{HnswConfigDiff, QuantizationConfigDiff};
+use crate::operations::point_ops::{PointStructPersisted, VectorStructPersisted};
 use crate::operations::query_enum::QueryEnum;
 use crate::operations::universal_query::shard_query::{ScoringQuery, ShardQueryRequest};
 use crate::save_on_disk;
@@ -72,6 +74,7 @@ pub enum CollectionStatus {
 }
 
 /// Current state of the shard (supports same states as the collection)
+///
 /// `Green` - all good. `Yellow` - optimization is running, 'Grey' - optimizations are possible but not triggered, `Red` - some operations failed and was not recovered
 #[derive(Debug, Serialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord, Copy, Clone)]
 #[serde(rename_all = "snake_case")]
@@ -118,7 +121,7 @@ pub enum OptimizersStatus {
 
 /// Point data
 #[derive(Clone, Debug, PartialEq)]
-pub struct Record {
+pub struct RecordInternal {
     /// Id of the point
     pub id: PointIdType,
     /// Payload - values assigned to the point
@@ -129,6 +132,55 @@ pub struct Record {
     pub shard_key: Option<ShardKey>,
     /// Order value, if used for order_by
     pub order_value: Option<OrderValue>,
+}
+
+/// Warn: panics if the vector is empty
+impl TryFrom<RecordInternal> for PointStructPersisted {
+    type Error = String;
+
+    fn try_from(record: RecordInternal) -> Result<Self, Self::Error> {
+        let RecordInternal {
+            id,
+            payload,
+            vector,
+            shard_key: _,
+            order_value: _,
+        } = record;
+
+        if vector.is_none() {
+            return Err("Vector is empty".to_string());
+        }
+
+        Ok(Self {
+            id,
+            payload,
+            vector: VectorStructPersisted::from(vector.unwrap()),
+        })
+    }
+}
+
+impl TryFrom<Record> for PointStructPersisted {
+    type Error = String;
+
+    fn try_from(record: Record) -> Result<Self, Self::Error> {
+        let Record {
+            id,
+            payload,
+            vector,
+            shard_key: _,
+            order_value: _,
+        } = record;
+
+        if vector.is_none() {
+            return Err("Vector is empty".to_string());
+        }
+
+        Ok(Self {
+            id,
+            payload,
+            vector: VectorStructPersisted::from(vector.unwrap()),
+        })
+    }
 }
 
 /// Current statistics and configuration of the collection
@@ -439,14 +491,14 @@ fn points_example() -> Vec<api::rest::Record> {
         api::rest::Record {
             id: PointIdType::NumId(40),
             payload: Some(Payload(payload_map_1)),
-            vector: Some(VectorStruct::Single(vec![0.875, 0.140625, 0.897_6])),
+            vector: Some(VectorStructOutput::Single(vec![0.875, 0.140625, 0.897_6])),
             shard_key: Some("region_1".into()),
             order_value: None,
         },
         api::rest::Record {
             id: PointIdType::NumId(41),
             payload: Some(Payload(payload_map_2)),
-            vector: Some(VectorStruct::Single(vec![0.75, 0.640625, 0.8945])),
+            vector: Some(VectorStructOutput::Single(vec![0.75, 0.640625, 0.8945])),
             shard_key: Some("region_1".into()),
             order_value: None,
         },
@@ -918,6 +970,8 @@ pub enum CollectionError {
     ObjectStoreError { what: String },
     #[error("Strict mode error: {description}")]
     StrictMode { description: String },
+    #[error("{description}")]
+    InferenceError { description: String },
 }
 
 impl CollectionError {
@@ -1017,6 +1071,7 @@ impl CollectionError {
             Self::ForwardProxyError { .. } => false,
             Self::ObjectStoreError { .. } => false,
             Self::StrictMode { .. } => false,
+            Self::InferenceError { .. } => false,
         }
     }
 
@@ -1277,7 +1332,7 @@ impl From<tempfile::PathPersistError> for CollectionError {
 
 pub type CollectionResult<T> = Result<T, CollectionError>;
 
-impl Record {
+impl RecordInternal {
     pub fn get_vector_by_name(&self, name: &str) -> Option<VectorRef> {
         match &self.vector {
             Some(VectorStructInternal::Single(vector)) => {
@@ -1445,18 +1500,17 @@ impl Anonymize for SparseIndexParams {
 }
 
 impl SparseIndexParams {
-    pub fn update_from_other(&mut self, other: &SparseIndexParams) {
+    pub fn update_from_other(&mut self, other: SparseIndexParams) {
         let SparseIndexParams {
             full_scan_threshold,
             on_disk,
             datatype,
         } = other;
 
-        *self = SparseIndexParams {
-            full_scan_threshold: full_scan_threshold.or(self.full_scan_threshold),
-            on_disk: on_disk.or(self.on_disk),
-            datatype: datatype.or(self.datatype),
-        };
+        self.full_scan_threshold
+            .replace_if_some(full_scan_threshold);
+        self.on_disk.replace_if_some(on_disk);
+        self.datatype.replace_if_some(datatype);
     }
 }
 

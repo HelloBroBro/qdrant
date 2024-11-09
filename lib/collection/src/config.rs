@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs::File;
 use std::io::{Read, Write};
 use std::num::NonZeroU32;
@@ -116,6 +116,54 @@ impl CollectionParams {
             PayloadStorageType::InMemory
         }
     }
+
+    pub fn check_compatible(&self, other: &CollectionParams) -> CollectionResult<()> {
+        let CollectionParams {
+            vectors,
+            shard_number: _, // Maybe be updated by resharding, assume local shards needs to be dropped
+            sharding_method, // Not changeable
+            replication_factor: _, // May be changed
+            write_consistency_factor: _, // May be changed
+            read_fan_out_factor: _, // May be changed
+            on_disk_payload: _, // May be changed
+            sparse_vectors,  // Parameters may be changes, but not the structure
+        } = other;
+
+        self.vectors.check_compatible(vectors)?;
+
+        let this_sparse_vectors: HashSet<_> = if let Some(sparse_vectors) = &self.sparse_vectors {
+            sparse_vectors.keys().collect()
+        } else {
+            HashSet::new()
+        };
+
+        let other_sparse_vectors: HashSet<_> = if let Some(sparse_vectors) = sparse_vectors {
+            sparse_vectors.keys().collect()
+        } else {
+            HashSet::new()
+        };
+
+        if this_sparse_vectors != other_sparse_vectors {
+            return Err(CollectionError::bad_input(format!(
+                "sparse vectors are incompatible: \
+                 origin sparse vectors: {this_sparse_vectors:?}, \
+                 while other sparse vectors: {other_sparse_vectors:?}",
+            )));
+        }
+
+        let this_sharding_method = self.sharding_method.unwrap_or_default();
+        let other_sharding_method = sharding_method.unwrap_or_default();
+
+        if this_sharding_method != other_sharding_method {
+            return Err(CollectionError::bad_input(format!(
+                "sharding method is incompatible: \
+                 origin sharding method: {this_sharding_method:?}, \
+                 while other sharding method: {other_sharding_method:?}",
+            )));
+        }
+
+        Ok(())
+    }
 }
 
 impl Anonymize for CollectionParams {
@@ -217,26 +265,64 @@ impl CollectionParams {
         }
     }
 
+    fn missing_vector_error(&self, vector_name: &str) -> CollectionError {
+        let mut available_names = vec![];
+
+        match &self.vectors {
+            VectorsConfig::Single(_) => {
+                available_names.push(DEFAULT_VECTOR_NAME.to_string());
+            }
+            VectorsConfig::Multi(vectors) => {
+                for name in vectors.keys() {
+                    available_names.push(name.clone());
+                }
+            }
+        }
+
+        if let Some(sparse_vectors) = &self.sparse_vectors {
+            for name in sparse_vectors.keys() {
+                available_names.push(name.clone());
+            }
+        }
+
+        if available_names.is_empty() {
+            CollectionError::BadInput {
+                description: "Vectors are not configured in this collection".into(),
+            }
+        } else if available_names == vec![DEFAULT_VECTOR_NAME] {
+            return CollectionError::BadInput {
+                description: format!(
+                    "Vector with name {vector_name} is not configured in this collection"
+                ),
+            };
+        } else {
+            let available_names = available_names.join(", ");
+            if vector_name == DEFAULT_VECTOR_NAME {
+                return CollectionError::BadInput {
+                    description: format!(
+                        "Collection requires specified vector name in the request, available names: {available_names}"
+                    ),
+                };
+            }
+
+            CollectionError::BadInput {
+                description: format!(
+                    "Vector with name `{vector_name}` is not configured in this collection, available names: {available_names}"
+                ),
+            }
+        }
+    }
+
     pub fn get_distance(&self, vector_name: &str) -> CollectionResult<Distance> {
         match self.vectors.get_params(vector_name) {
             Some(params) => Ok(params.distance),
             None => {
                 if let Some(sparse_vectors) = &self.sparse_vectors {
-                    sparse_vectors
-                        .get(vector_name)
-                        .ok_or_else(|| CollectionError::BadInput {
-                            description: format!(
-                                "Vector params for {vector_name} are not specified in config"
-                            ),
-                        })
-                        .map(|_params| Distance::Dot)
-                } else {
-                    Err(CollectionError::BadInput {
-                        description: format!(
-                            "Vector params for {vector_name} are not specified in config"
-                        ),
-                    })
+                    if let Some(_params) = sparse_vectors.get(vector_name) {
+                        return Ok(Distance::Dot);
+                    }
                 }
+                Err(self.missing_vector_error(vector_name))
             }
         }
     }
@@ -266,11 +352,15 @@ impl CollectionParams {
         self.sparse_vectors
             .as_mut()
             .ok_or_else(|| CollectionError::BadInput {
-                description: format!("Vector params for {vector_name} are not specified in config"),
+                description: format!(
+                    "Sparse vector `{vector_name}` is not specified in collection config"
+                ),
             })?
             .get_mut(vector_name)
             .ok_or_else(|| CollectionError::BadInput {
-                description: format!("Vector params for {vector_name} are not specified in config"),
+                description: format!(
+                    "Sparse vector `{vector_name}` is not specified in collection config"
+                ),
             })
     }
 
@@ -332,9 +422,9 @@ impl CollectionParams {
 
             if let Some(index) = index {
                 if let Some(existing_index) = &mut sparse_vector_params.index {
-                    existing_index.update_from_other(&index);
+                    existing_index.update_from_other(index);
                 } else {
-                    sparse_vector_params.index = Some(index);
+                    sparse_vector_params.index.replace(index);
                 }
             }
         }

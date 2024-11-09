@@ -3,11 +3,11 @@ use std::sync::Arc;
 use api::rest::SearchRequestInternal;
 use collection::config::{CollectionConfig, CollectionParams, WalConfig};
 use collection::operations::point_ops::{
-    PointInsertOperationsInternal, PointOperations, PointStruct,
+    PointInsertOperationsInternal, PointOperations, PointStructPersisted,
 };
 use collection::operations::types::CoreSearchRequestBatch;
 use collection::operations::universal_query::shard_query::{
-    Fusion, ScoringQuery, ShardPrefetch, ShardQueryRequest,
+    FusionInternal, ScoringQuery, ShardPrefetch, ShardQueryRequest,
 };
 use collection::operations::vector_params_builder::VectorParamsBuilder;
 use collection::operations::CollectionUpdateOperations;
@@ -15,6 +15,7 @@ use collection::optimizers_builder::OptimizersConfig;
 use collection::save_on_disk::SaveOnDisk;
 use collection::shards::local_shard::LocalShard;
 use collection::shards::shard_trait::ShardOperation;
+use common::counter::hardware_accumulator::HwMeasurementAcc;
 use common::cpu::CpuBudget;
 use criterion::{criterion_group, criterion_main, Criterion};
 use rand::thread_rng;
@@ -108,7 +109,7 @@ fn create_rnd_batch() -> CollectionUpdateOperations {
         payload_map.insert("a".to_string(), (i % 5).into());
         let vector = random_vector(&mut rng, dim);
         let vectors = only_default_vector(&vector);
-        let point = PointStruct {
+        let point = PointStructPersisted {
             id: (i as u64).into(),
             vector: VectorStructInternal::from(vectors).into(),
             payload: Some(Payload(payload_map)),
@@ -174,7 +175,12 @@ fn batch_search_bench(c: &mut Criterion) {
                     }
 
                     let result = shard
-                        .query_batch(Arc::new(searches), search_runtime_handle, None)
+                        .query_batch(
+                            Arc::new(searches),
+                            search_runtime_handle,
+                            None,
+                            HwMeasurementAcc::new(),
+                        )
                         .await
                         .unwrap();
                     assert!(!result.is_empty());
@@ -204,7 +210,12 @@ fn batch_search_bench(c: &mut Criterion) {
 
                     let search_query = CoreSearchRequestBatch { searches };
                     let result = shard
-                        .core_search(Arc::new(search_query), search_runtime_handle, None)
+                        .core_search(
+                            Arc::new(search_query),
+                            search_runtime_handle,
+                            None,
+                            HwMeasurementAcc::new(),
+                        )
                         .await
                         .unwrap();
                     assert!(!result.is_empty());
@@ -254,7 +265,7 @@ fn batch_rrf_query_bench(c: &mut Criterion) {
                                     score_threshold: None,
                                 },
                             ],
-                            query: Some(ScoringQuery::Fusion(Fusion::Rrf)),
+                            query: Some(ScoringQuery::Fusion(FusionInternal::Rrf)),
                             filter: filter.clone(),
                             params: None,
                             limit: 10,
@@ -267,7 +278,12 @@ fn batch_rrf_query_bench(c: &mut Criterion) {
                     }
 
                     let result = shard
-                        .query_batch(Arc::new(searches), search_runtime_handle, None)
+                        .query_batch(
+                            Arc::new(searches),
+                            search_runtime_handle,
+                            None,
+                            HwMeasurementAcc::new(),
+                        )
                         .await
                         .unwrap();
                     assert!(!result.is_empty());
@@ -320,7 +336,12 @@ fn batch_rescore_bench(c: &mut Criterion) {
                     }
 
                     let result = shard
-                        .query_batch(Arc::new(searches), search_runtime_handle, None)
+                        .query_batch(
+                            Arc::new(searches),
+                            search_runtime_handle,
+                            None,
+                            HwMeasurementAcc::new(),
+                        )
                         .await
                         .unwrap();
                     assert!(!result.is_empty());

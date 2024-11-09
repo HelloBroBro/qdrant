@@ -126,6 +126,7 @@ impl TableOfContent {
             optimizers_config,
             quantization_config,
             sparse_vectors,
+            strict_mode_config: strict_mode,
         } = operation.update_collection;
         let collection = self
             .get_collection_unchecked(&operation.collection_name)
@@ -160,6 +161,9 @@ impl TableOfContent {
         }
         if let Some(changes) = replica_changes {
             collection.handle_replica_changes(changes).await?;
+        }
+        if let Some(strict_mode) = strict_mode {
+            collection.update_strict_mode_config(strict_mode).await?;
         }
 
         // Recreate optimizers
@@ -255,12 +259,8 @@ impl TableOfContent {
                             alias_name,
                         },
                 }) => {
-                    collection_lock
-                        .validate_collection_exists(&collection_name)
-                        .await?;
-                    collection_lock
-                        .validate_collection_not_exists(&alias_name)
-                        .await?;
+                    collection_lock.validate_collection_exists(&collection_name)?;
+                    collection_lock.validate_collection_not_exists(&alias_name)?;
 
                     alias_lock.insert(alias_name, collection_name)?;
                 }

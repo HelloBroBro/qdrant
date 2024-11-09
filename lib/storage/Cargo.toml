@@ -32,6 +32,7 @@ tonic = { workspace = true }
 http = "0.2"
 parking_lot = { workspace = true }
 strum = { workspace = true }
+tap = { workspace = true }
 tar = { workspace = true }
 chrono = { workspace = true }
 validator = { workspace = true }
@@ -52,9 +53,9 @@ segment = { path = "../segment" }
 collection = { path = "../collection" }
 api = { path = "../api" }
 futures = { workspace = true }
-anyhow = "1.0.89"
+anyhow = "1.0.92"
 uuid = { workspace = true }
-url = "2.5.2"
+url = "2.5.3"
 reqwest = { workspace = true }
 tempfile = { workspace = true }
 async-trait = "0.1.83"

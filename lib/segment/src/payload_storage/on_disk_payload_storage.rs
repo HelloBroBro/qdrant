@@ -1,3 +1,4 @@
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use common::types::PointOffsetType;
@@ -51,22 +52,6 @@ impl OnDiskPayloadStorage {
             .get_pinned(&key, |raw| serde_cbor::from_slice(raw))?
             .transpose()
             .map_err(OperationError::from)
-    }
-
-    pub fn iter<F>(&self, mut callback: F) -> OperationResult<()>
-    where
-        F: FnMut(PointOffsetType, &Payload) -> OperationResult<bool>,
-    {
-        for (key, val) in self.db_wrapper.lock_db().iter()? {
-            let do_continue = callback(
-                serde_cbor::from_slice(&key)?,
-                &serde_cbor::from_slice(&val)?,
-            )?;
-            if !do_continue {
-                return Ok(());
-            }
-        }
-        Ok(())
     }
 }
 
@@ -142,5 +127,25 @@ impl PayloadStorage for OnDiskPayloadStorage {
 
     fn flusher(&self) -> Flusher {
         self.db_wrapper.flusher()
+    }
+
+    fn iter<F>(&self, mut callback: F) -> OperationResult<()>
+    where
+        F: FnMut(PointOffsetType, &Payload) -> OperationResult<bool>,
+    {
+        for (key, val) in self.db_wrapper.lock_db().iter()? {
+            let do_continue = callback(
+                serde_cbor::from_slice(&key)?,
+                &serde_cbor::from_slice(&val)?,
+            )?;
+            if !do_continue {
+                return Ok(());
+            }
+        }
+        Ok(())
+    }
+
+    fn files(&self) -> Vec<PathBuf> {
+        vec![]
     }
 }

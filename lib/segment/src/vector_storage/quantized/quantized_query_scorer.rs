@@ -1,6 +1,7 @@
 use std::borrow::Cow;
 use std::marker::PhantomData;
 
+use common::counter::hardware_counter::HardwareCounterCell;
 use common::types::{PointOffsetType, ScoreType};
 use itertools::Itertools;
 
@@ -20,6 +21,7 @@ where
     quantized_data: &'a TEncodedVectors,
     metric: PhantomData<TMetric>,
     element: PhantomData<TElement>,
+    hardware_counter: HardwareCounterCell,
 }
 
 impl<'a, TElement, TMetric, TEncodedQuery, TEncodedVectors>
@@ -48,6 +50,7 @@ where
             quantized_data,
             metric: PhantomData,
             element: PhantomData,
+            hardware_counter: HardwareCounterCell::new(),
         }
     }
 
@@ -80,6 +83,7 @@ where
             quantized_data,
             metric: PhantomData,
             element: PhantomData,
+            hardware_counter: HardwareCounterCell::new(),
         }
     }
 }
@@ -91,7 +95,8 @@ where
     TEncodedVectors: quantization::EncodedVectors<TEncodedQuery>,
 {
     fn score_stored(&self, idx: PointOffsetType) -> ScoreType {
-        self.quantized_data.score_point(&self.query, idx)
+        self.quantized_data
+            .score_point(&self.query, idx, &self.hardware_counter)
     }
 
     fn score(&self, _v2: &[TElement]) -> ScoreType {
@@ -99,6 +104,17 @@ where
     }
 
     fn score_internal(&self, point_a: PointOffsetType, point_b: PointOffsetType) -> ScoreType {
-        self.quantized_data.score_internal(point_a, point_b)
+        self.quantized_data
+            .score_internal(point_a, point_b, &self.hardware_counter)
+    }
+
+    fn take_hardware_counter(&self) -> HardwareCounterCell {
+        let mut counter = self.hardware_counter.take();
+
+        counter
+            .cpu_counter_mut()
+            .multiplied_mut(size_of::<TElement>());
+
+        counter
     }
 }

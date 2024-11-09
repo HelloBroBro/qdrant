@@ -7,7 +7,7 @@ use api::grpc::qdrant::{
     ClearPayloadPointsInternal, CoreSearchBatchPointsInternal, CountPointsInternal, CountResponse,
     CreateFieldIndexCollectionInternal, DeleteFieldIndexCollectionInternal,
     DeletePayloadPointsInternal, DeletePointsInternal, DeleteVectorsInternal, FacetCountsInternal,
-    FacetResponseInternal, GetPointsInternal, GetResponse, IntermediateResult,
+    FacetResponseInternal, GetPointsInternal, GetResponse, HardwareUsage, IntermediateResult,
     PointsOperationResponseInternal, QueryBatchPointsInternal, QueryBatchResponseInternal,
     QueryResultInternal, QueryShardPoints, RecommendPointsInternal, RecommendResponse,
     ScrollPointsInternal, ScrollResponse, SearchBatchResponse, SetPayloadPointsInternal,
@@ -16,6 +16,7 @@ use api::grpc::qdrant::{
 use collection::operations::shard_selector_internal::ShardSelectorInternal;
 use collection::operations::universal_query::shard_query::ShardQueryRequest;
 use collection::shards::shard::ShardId;
+use common::counter::hardware_accumulator::HwMeasurementAcc;
 use itertools::Itertools;
 use segment::data_types::facets::{FacetParams, FacetResponse};
 use segment::json_path::JsonPath;
@@ -26,6 +27,7 @@ use tonic::{Request, Response, Status};
 
 use super::points_common::{core_search_list, scroll};
 use super::validate_and_log;
+use crate::settings::ServiceConfig;
 use crate::tonic::api::points_common::{
     clear_payload, count, create_field_index_internal, delete, delete_field_index_internal,
     delete_payload, delete_vectors, get, overwrite_payload, recommend, set_payload, sync,
@@ -38,11 +40,15 @@ const FULL_ACCESS: Access = Access::full("Internal API");
 /// This API is intended for P2P communication within a distributed deployment.
 pub struct PointsInternalService {
     toc: Arc<TableOfContent>,
+    service_config: ServiceConfig,
 }
 
 impl PointsInternalService {
-    pub fn new(toc: Arc<TableOfContent>) -> Self {
-        Self { toc }
+    pub fn new(toc: Arc<TableOfContent>, service_config: ServiceConfig) -> Self {
+        Self {
+            toc,
+            service_config,
+        }
     }
 }
 
@@ -52,6 +58,7 @@ pub async fn query_batch_internal(
     query_points: Vec<QueryShardPoints>,
     shard_selection: Option<ShardId>,
     timeout: Option<Duration>,
+    service_config: &ServiceConfig,
 ) -> Result<Response<QueryBatchResponseInternal>, Status> {
     let batch_requests: Vec<_> = query_points
         .into_iter()
@@ -70,8 +77,16 @@ pub async fn query_batch_internal(
         Some(shard_id) => ShardSelectorInternal::ShardId(shard_id),
     };
 
+    let hw_measurement_acc = HwMeasurementAcc::new();
+
     let batch_response = toc
-        .query_batch_internal(&collection_name, batch_requests, shard_selection, timeout)
+        .query_batch_internal(
+            &collection_name,
+            batch_requests,
+            shard_selection,
+            timeout,
+            hw_measurement_acc.clone(),
+        )
         .await?;
 
     let response = QueryBatchResponseInternal {
@@ -87,6 +102,9 @@ pub async fn query_batch_internal(
             })
             .collect(),
         time: timing.elapsed().as_secs_f64(),
+        usage: service_config
+            .hardware_reporting()
+            .then(|| HardwareUsage::from(hw_measurement_acc)),
     };
 
     Ok(Response::new(response))
@@ -416,6 +434,7 @@ impl PointsInternal for PointsInternalService {
             shard_id,
             FULL_ACCESS.clone(),
             timeout,
+            &self.service_config,
         )
         .await
     }
@@ -441,6 +460,7 @@ impl PointsInternal for PointsInternalService {
             UncheckedTocProvider::new_unchecked(&self.toc),
             recommend_points,
             FULL_ACCESS.clone(),
+            &self.service_config,
         )
         .await
     }
@@ -513,6 +533,7 @@ impl PointsInternal for PointsInternalService {
             count_points,
             shard_id,
             &FULL_ACCESS,
+            &self.service_config,
         )
         .await
     }
@@ -562,6 +583,7 @@ impl PointsInternal for PointsInternalService {
             query_points,
             shard_id,
             timeout,
+            &self.service_config,
         )
         .await
     }

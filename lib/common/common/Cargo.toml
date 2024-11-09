@@ -17,7 +17,7 @@ testing = []
 
 [dependencies]
 num_cpus = "1.16"
-ordered-float = "4.3"
+ordered-float = { workspace = true }
 ph = { workspace = true }
 rand = { workspace = true }
 serde = { workspace = true }
@@ -34,7 +34,7 @@ log = { workspace = true }
 
 [dev-dependencies]
 common = { path = ".", features = ["testing"] }
-criterion = "0.5"
+criterion = { workspace = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 thiserror = { workspace = true }

@@ -13,7 +13,7 @@ use segment::data_types::facets::{FacetParams, FacetValue};
 use segment::data_types::named_vectors::NamedVectors;
 use segment::data_types::order_by::OrderValue;
 use segment::data_types::query_context::{QueryContext, SegmentQueryContext};
-use segment::data_types::vectors::{QueryVector, Vector};
+use segment::data_types::vectors::{QueryVector, VectorInternal};
 use segment::entry::entry_point::SegmentEntry;
 use segment::index::field_index::{CardinalityEstimation, FieldIndex};
 use segment::json_path::JsonPath;
@@ -31,6 +31,7 @@ type LockedFieldsSet = Arc<RwLock<HashSet<PayloadKeyType>>>;
 type LockedFieldsMap = Arc<RwLock<HashMap<PayloadKeyType, PayloadFieldSchema>>>;
 
 /// This object is a wrapper around read-only segment.
+///
 /// It could be used to provide all read and write operations while wrapped segment is being optimized (i.e. not available for writing)
 /// It writes all changed records into a temporary `write_segment` and keeps track on changed points
 #[derive(Debug)]
@@ -297,6 +298,8 @@ impl ProxySegment {
         top: usize,
         params: Option<&SearchParams>,
     ) -> OperationResult<Vec<ScoredPoint>> {
+        let query_context = QueryContext::default();
+        let segment_query_context = query_context.get_segment_query_context();
         let result = self.search_batch(
             vector_name,
             &[vector],
@@ -305,8 +308,13 @@ impl ProxySegment {
             filter,
             top,
             params,
-            Default::default(),
+            &segment_query_context,
         )?;
+
+        // This function is only for testing and no measurements are needed.
+        segment_query_context
+            .take_hardware_counter()
+            .discard_results();
 
         Ok(result.into_iter().next().unwrap())
     }
@@ -338,7 +346,7 @@ impl SegmentEntry for ProxySegment {
         filter: Option<&Filter>,
         top: usize,
         params: Option<&SearchParams>,
-        query_context: SegmentQueryContext,
+        query_context: &SegmentQueryContext,
     ) -> OperationResult<Vec<Vec<ScoredPoint>>> {
         let deleted_points = self.deleted_points.read();
 
@@ -351,10 +359,11 @@ impl SegmentEntry for ProxySegment {
             // we can make this hack of replacing deleted_points of the wrapped_segment
             // with our proxied deleted_points, do avoid additional filter creation
             if let Some(deleted_points) = self.deleted_mask.as_ref() {
-                let query_context_with_deleted =
-                    query_context.clone().with_deleted_points(deleted_points);
+                let query_context_with_deleted = query_context
+                    .clone_no_counters()
+                    .with_deleted_points(deleted_points);
 
-                self.wrapped_segment.get().read().search_batch(
+                let res = self.wrapped_segment.get().read().search_batch(
                     vector_name,
                     vectors,
                     with_payload,
@@ -362,8 +371,13 @@ impl SegmentEntry for ProxySegment {
                     filter,
                     top,
                     params,
-                    query_context_with_deleted,
-                )?
+                    &query_context_with_deleted,
+                );
+
+                let counters = query_context_with_deleted.take_hardware_counter();
+                query_context.merge_hardware_counter(counters);
+
+                res?
             } else {
                 let wrapped_filter =
                     Self::add_deleted_points_condition_to_filter(filter, &deleted_points);
@@ -376,7 +390,7 @@ impl SegmentEntry for ProxySegment {
                     Some(&wrapped_filter),
                     top,
                     params,
-                    query_context.clone(),
+                    query_context,
                 )?
             }
         } else {
@@ -388,7 +402,7 @@ impl SegmentEntry for ProxySegment {
                 filter,
                 top,
                 params,
-                query_context.clone(),
+                query_context,
             )?
         };
         let mut write_results = self.write_segment.get().read().search_batch(
@@ -532,7 +546,11 @@ impl SegmentEntry for ProxySegment {
             .clear_payload(op_num, point_id)
     }
 
-    fn vector(&self, vector_name: &str, point_id: PointIdType) -> OperationResult<Option<Vector>> {
+    fn vector(
+        &self,
+        vector_name: &str,
+        point_id: PointIdType,
+    ) -> OperationResult<Option<VectorInternal>> {
         return if self.deleted_points.read().contains(&point_id) {
             self.write_segment
                 .get()
@@ -793,25 +811,25 @@ impl SegmentEntry for ProxySegment {
     }
 
     fn available_vectors_size_in_bytes(&self, vector_name: &str) -> OperationResult<usize> {
-        let wrapped_size = self
-            .wrapped_segment
-            .get()
-            .read()
-            .available_vectors_size_in_bytes(vector_name)?;
-        let wrapped_count = self.wrapped_segment.get().read().available_point_count();
-        let write_size = self
-            .write_segment
-            .get()
-            .read()
-            .available_vectors_size_in_bytes(vector_name)?;
-        let write_count = self.write_segment.get().read().available_point_count();
-        let deleted_points_count = self.deleted_points.read().len();
+        let wrapped_segment = self.wrapped_segment.get();
+        let wrapped_segment_guard = wrapped_segment.read();
+        let wrapped_size = wrapped_segment_guard.available_vectors_size_in_bytes(vector_name)?;
+        let wrapped_count = wrapped_segment_guard.available_point_count();
+        drop(wrapped_segment_guard);
+
+        let write_segment = self.write_segment.get();
+        let write_segment_guard = write_segment.read();
+        let write_size = write_segment_guard.available_vectors_size_in_bytes(vector_name)?;
+        let write_count = write_segment_guard.available_point_count();
+        drop(write_segment_guard);
+
         let stored_points = wrapped_count + write_count;
-        let avaliable_points = stored_points.saturating_sub(deleted_points_count);
         // because we don't know the exact size of deleted vectors, we assume that they are the same avg size as the wrapped ones
         if stored_points > 0 {
+            let deleted_points_count = self.deleted_points.read().len();
+            let available_points = stored_points.saturating_sub(deleted_points_count);
             Ok(
-                ((wrapped_size as u128 + write_size as u128) * avaliable_points as u128
+                ((wrapped_size as u128 + write_size as u128) * available_points as u128
                     / stored_points as u128) as usize,
             )
         } else {
@@ -898,6 +916,7 @@ impl SegmentEntry for ProxySegment {
             num_indexed_vectors,
             num_points: self.available_point_count(),
             num_deleted_vectors: write_info.num_deleted_vectors,
+            vectors_size_bytes: wrapped_info.vectors_size_bytes + write_info.vectors_size_bytes,
             ram_usage_bytes: wrapped_info.ram_usage_bytes + write_info.ram_usage_bytes,
             disk_usage_bytes: wrapped_info.disk_usage_bytes + write_info.disk_usage_bytes,
             is_appendable: false,
@@ -1235,6 +1254,9 @@ mod tests {
 
         eprintln!("search_result = {search_result:#?}");
 
+        let query_context = QueryContext::default();
+        let segment_query_context = query_context.get_segment_query_context();
+
         let search_batch_result = proxy_segment
             .search_batch(
                 DEFAULT_VECTOR_NAME,
@@ -1244,14 +1266,17 @@ mod tests {
                 None,
                 10,
                 None,
-                Default::default(),
+                &segment_query_context,
             )
             .unwrap();
 
         eprintln!("search_batch_result = {search_batch_result:#?}");
 
         assert!(!search_result.is_empty());
-        assert_eq!(search_result, search_batch_result[0].clone())
+        assert_eq!(search_result, search_batch_result[0].clone());
+        let counter = segment_query_context.take_hardware_counter();
+        assert!(counter.cpu_counter().get() > 0);
+        counter.discard_results();
     }
 
     #[test]
@@ -1289,6 +1314,9 @@ mod tests {
 
         eprintln!("search_result = {search_result:#?}");
 
+        let query_context = QueryContext::default();
+        let segment_query_context = query_context.get_segment_query_context();
+
         let search_batch_result = proxy_segment
             .search_batch(
                 DEFAULT_VECTOR_NAME,
@@ -1298,9 +1326,13 @@ mod tests {
                 None,
                 10,
                 None,
-                Default::default(),
+                &segment_query_context,
             )
             .unwrap();
+
+        segment_query_context
+            .take_hardware_counter()
+            .discard_results();
 
         eprintln!("search_batch_result = {search_batch_result:#?}");
 
@@ -1353,6 +1385,9 @@ mod tests {
 
         eprintln!("search_result = {all_single_results:#?}");
 
+        let query_context = QueryContext::default();
+        let segment_query_context = query_context.get_segment_query_context();
+
         let search_batch_result = proxy_segment
             .search_batch(
                 DEFAULT_VECTOR_NAME,
@@ -1362,9 +1397,13 @@ mod tests {
                 None,
                 10,
                 None,
-                Default::default(),
+                &segment_query_context,
             )
             .unwrap();
+
+        segment_query_context
+            .take_hardware_counter()
+            .discard_results();
 
         eprintln!("search_batch_result = {search_batch_result:#?}");
 
@@ -1814,11 +1853,11 @@ mod tests {
         );
 
         // Unwrapped `LockedSegment`s for convenient access
-        let LockedSegment::Original(wrapped_segment) = locked_wrapped_segment.clone() else {
+        let LockedSegment::Original(wrapped_segment) = locked_wrapped_segment else {
             unreachable!();
         };
 
-        let LockedSegment::Original(write_segment) = locked_write_segment.clone() else {
+        let LockedSegment::Original(write_segment) = locked_write_segment else {
             unreachable!()
         };
 

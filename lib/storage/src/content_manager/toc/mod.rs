@@ -46,6 +46,7 @@ pub const COLLECTIONS_DIR: &str = "collections";
 pub const FULL_SNAPSHOT_FILE_NAME: &str = "full-snapshot";
 
 /// The main object of the service. It holds all objects, required for proper functioning.
+///
 /// In most cases only one `TableOfContent` is enough for service. It is created only once during
 /// the launch of the service.
 pub struct TableOfContent {
@@ -136,11 +137,10 @@ impl TableOfContent {
                     .to_shared_storage_config(is_distributed)
                     .into(),
                 channel_service.clone(),
-                Self::change_peer_state_callback(
+                Self::change_peer_from_state_callback(
                     consensus_proposal_sender.clone(),
                     collection_name.clone(),
                     ReplicaState::Dead,
-                    None,
                 ),
                 Self::request_shard_transfer_callback(
                     consensus_proposal_sender.clone(),
@@ -243,7 +243,7 @@ impl TableOfContent {
 
         let real_collection_name = {
             let alias_persistence = self.alias_persistence.read().await;
-            Self::resolve_name(collection_name, &read_collection, &alias_persistence).await?
+            Self::resolve_name(collection_name, &read_collection, &alias_persistence)?
         };
         // resolve_name already checked collection existence, unwrap is safe here
         Ok(RwLockReadGuard::map(read_collection, |collection| {
@@ -278,7 +278,7 @@ impl TableOfContent {
     /// If the collection exists - return its name
     /// If alias exists - returns the original collection name
     /// If neither exists - returns [`StorageError`]
-    async fn resolve_name(
+    fn resolve_name(
         collection_name: &str,
         collections: &Collections,
         aliases: &AliasPersistence,
@@ -289,9 +289,7 @@ impl TableOfContent {
             None => collection_name.to_string(),
             Some(resolved_alias) => resolved_alias,
         };
-        collections
-            .validate_collection_exists(&resolved_name)
-            .await?;
+        collections.validate_collection_exists(&resolved_name)?;
         Ok(resolved_name)
     }
 
@@ -333,7 +331,7 @@ impl TableOfContent {
         Ok(aliases)
     }
 
-    pub async fn suggest_shard_distribution(
+    pub fn suggest_shard_distribution(
         &self,
         op: &CreateCollectionOperation,
         suggested_shard_number: NonZeroU32,
@@ -460,7 +458,7 @@ impl TableOfContent {
         let collections = self.collections.read().await;
         if let Some(proposal_sender) = &self.consensus_proposal_sender {
             for collection in collections.values() {
-                for transfer in collection.get_outgoing_transfers(&self.this_peer_id).await {
+                for transfer in collection.get_outgoing_transfers(self.this_peer_id).await {
                     let cancel_transfer =
                         ConsensusOperations::abort_transfer(collection.name(), transfer, reason);
                     proposal_sender.send(cancel_transfer)?;
@@ -478,7 +476,17 @@ impl TableOfContent {
         state: ReplicaState,
         from_state: Option<ReplicaState>,
     ) -> replica_set::ChangePeerState {
-        Arc::new(move |peer_id, shard_id| {
+        let callback =
+            Self::change_peer_from_state_callback(proposal_sender, collection_name, state);
+        Arc::new(move |peer_id, shard_id| callback(peer_id, shard_id, from_state))
+    }
+
+    fn change_peer_from_state_callback(
+        proposal_sender: Option<OperationSender>,
+        collection_name: String,
+        state: ReplicaState,
+    ) -> replica_set::ChangePeerFromState {
+        Arc::new(move |peer_id, shard_id, from_state| {
             if let Some(proposal_sender) = &proposal_sender {
                 if let Err(send_error) = Self::send_set_replica_state_proposal_op(
                     proposal_sender,
@@ -488,13 +496,7 @@ impl TableOfContent {
                     state,
                     from_state,
                 ) {
-                    log::error!(
-                        "Can't send proposal to deactivate replica on peer {} of shard {} of collection {}. Error: {}",
-                        peer_id,
-                        shard_id,
-                        collection_name,
-                        send_error
-                    );
+                    log::error!("Can't send proposal to deactivate replica on peer {peer_id} of shard {shard_id} of collection {collection_name}. Error: {send_error}");
                 }
             } else {
                 log::error!("Can't send proposal to deactivate replica. Error: this is a single node deployment");

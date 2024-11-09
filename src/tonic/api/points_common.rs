@@ -1,22 +1,26 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use api::grpc::conversions::{json_path_from_proto, proto_to_payloads};
+use api::conversions::json::{json_path_from_proto, proto_to_payloads};
 use api::grpc::qdrant::payload_index_params::IndexParams;
 use api::grpc::qdrant::points_update_operation::{ClearPayload, Operation, PointStructList};
 use api::grpc::qdrant::{
     points_update_operation, BatchResult, ClearPayloadPoints, CoreSearchPoints, CountPoints,
     CountResponse, CreateFieldIndexCollection, DeleteFieldIndexCollection, DeletePayloadPoints,
     DeletePointVectors, DeletePoints, DiscoverBatchResponse, DiscoverPoints, DiscoverResponse,
-    FacetCounts, FacetResponse, FieldType, GetPoints, GetResponse, PayloadIndexParams,
-    PointsOperationResponseInternal, PointsSelector, QueryBatchResponse, QueryGroupsResponse,
-    QueryPointGroups, QueryPoints, QueryResponse, ReadConsistency as ReadConsistencyGrpc,
-    RecommendBatchResponse, RecommendGroupsResponse, RecommendPointGroups, RecommendPoints,
-    RecommendResponse, ScrollPoints, ScrollResponse, SearchBatchResponse, SearchGroupsResponse,
-    SearchMatrixPoints, SearchPointGroups, SearchPoints, SearchResponse, SetPayloadPoints,
-    SyncPoints, UpdateBatchPoints, UpdateBatchResponse, UpdatePointVectors, UpsertPoints,
+    FacetCounts, FacetResponse, FieldType, GetPoints, GetResponse, GroupsResult, HardwareUsage,
+    PayloadIndexParams, PointsOperationResponseInternal, PointsSelector, QueryBatchResponse,
+    QueryGroupsResponse, QueryPointGroups, QueryPoints, QueryResponse,
+    ReadConsistency as ReadConsistencyGrpc, RecommendBatchResponse, RecommendGroupsResponse,
+    RecommendPointGroups, RecommendPoints, RecommendResponse, ScrollPoints, ScrollResponse,
+    SearchBatchResponse, SearchGroupsResponse, SearchMatrixPoints, SearchPointGroups, SearchPoints,
+    SearchResponse, SetPayloadPoints, SyncPoints, UpdateBatchPoints, UpdateBatchResponse,
+    UpdatePointVectors, UpsertPoints,
 };
-use api::rest::{OrderByInterface, ShardKeySelector};
+use api::rest::schema::{PointInsertOperations, PointsList};
+use api::rest::{
+    OrderByInterface, PointStruct, PointVectors, ShardKeySelector, UpdateVectors, VectorStruct,
+};
 use collection::collection::distance_matrix::{
     CollectionSearchMatrixRequest, CollectionSearchMatrixResponse,
 };
@@ -25,26 +29,22 @@ use collection::operations::conversions::{
     try_discover_request_from_grpc, try_points_selector_from_grpc, write_ordering_from_proto,
 };
 use collection::operations::payload_ops::DeletePayload;
-use collection::operations::point_ops::{
-    self, PointInsertOperations, PointOperations, PointSyncOperation, PointsList,
-};
+use collection::operations::point_ops::{self, PointOperations, PointSyncOperation};
 use collection::operations::query_enum::QueryEnum;
 use collection::operations::shard_selector_internal::ShardSelectorInternal;
 use collection::operations::types::{
     default_exact_count, CoreSearchRequest, CoreSearchRequestBatch, PointRequestInternal,
-    RecommendExample, Record, ScrollRequestInternal,
+    RecommendExample, ScrollRequestInternal,
 };
-use collection::operations::universal_query::collection_query::{
-    CollectionQueryGroupsRequest, CollectionQueryRequest,
-};
-use collection::operations::vector_ops::{DeleteVectors, PointVectors, UpdateVectors};
+use collection::operations::vector_ops::DeleteVectors;
 use collection::operations::verification::new_unchecked_verification_pass;
 use collection::operations::{ClockTag, CollectionUpdateOperations, OperationWithClockTag};
 use collection::shards::shard::ShardId;
+use common::counter::hardware_accumulator::HwMeasurementAcc;
 use itertools::Itertools;
 use segment::data_types::facets::FacetParams;
 use segment::data_types::order_by::OrderBy;
-use segment::data_types::vectors::{VectorStructInternal, DEFAULT_VECTOR_NAME};
+use segment::data_types::vectors::DEFAULT_VECTOR_NAME;
 use segment::types::{
     ExtendedPointId, Filter, PayloadFieldSchema, PayloadSchemaParams, PayloadSchemaType,
 };
@@ -53,6 +53,11 @@ use storage::dispatcher::Dispatcher;
 use storage::rbac::Access;
 use tonic::{Response, Status};
 
+use crate::common::inference::query_requests_grpc::{
+    convert_query_point_groups_from_grpc, convert_query_points_from_grpc,
+};
+use crate::common::inference::service::InferenceType;
+use crate::common::inference::update_requests::convert_point_struct;
 use crate::common::points::{
     do_clear_payload, do_core_search_points, do_count_points, do_create_index,
     do_create_index_internal, do_delete_index, do_delete_index_internal, do_delete_payload,
@@ -60,6 +65,7 @@ use crate::common::points::{
     do_query_batch_points, do_query_point_groups, do_query_points, do_scroll_points,
     do_search_batch_points, do_set_payload, do_update_vectors, do_upsert_points, CreateFieldIndex,
 };
+use crate::settings::ServiceConfig;
 use crate::tonic::verification::{CheckedTocProvider, StrictModeCheckedTocProvider};
 
 fn extract_points_selector(
@@ -119,12 +125,11 @@ pub async fn upsert(
         ordering,
         shard_key_selector,
     } = upsert_points;
-    let points = points
-        .into_iter()
-        .map(|point| point.try_into())
-        .collect::<Result<_, _>>()?;
+
+    let points: Result<_, _> = points.into_iter().map(PointStruct::try_from).collect();
+
     let operation = PointInsertOperations::PointsList(PointsList {
-        points,
+        points: points?,
         shard_key: shard_key_selector.map(ShardKeySelector::from),
     });
     let timing = Instant::now();
@@ -160,12 +165,13 @@ pub async fn sync(
         ordering,
     } = sync_points;
 
-    let points = points
-        .into_iter()
-        .map(|point| point.try_into())
-        .collect::<Result<_, _>>()?;
-
     let timing = Instant::now();
+
+    let point_structs: Result<_, _> = points.into_iter().map(PointStruct::try_from).collect();
+
+    // No actual inference should happen here, as we are just syncing existing points
+    // So this function is used for consistency only
+    let points = convert_point_struct(point_structs?, InferenceType::Update).await?;
 
     let operation = PointSyncOperation {
         points,
@@ -260,14 +266,11 @@ pub async fn update_vectors(
             Some(id) => id.try_into()?,
             None => return Err(Status::invalid_argument("id is expected")),
         };
-        let vector: VectorStructInternal = match point.vectors {
-            Some(vectors) => vectors.try_into()?,
+        let vector = match point.vectors {
+            Some(vectors) => VectorStruct::try_from(vectors)?,
             None => return Err(Status::invalid_argument("vectors is expected")),
         };
-        op_points.push(PointVectors {
-            id,
-            vector: api::rest::VectorStruct::from(vector),
-        });
+        op_points.push(PointVectors { id, vector });
     }
 
     let operation = UpdateVectors {
@@ -544,7 +547,7 @@ pub async fn update_batch(
     for op in operations {
         let operation = op
             .operation
-            .ok_or(Status::invalid_argument("Operation is missing"))?;
+            .ok_or_else(|| Status::invalid_argument("Operation is missing"))?;
         let collection_name = collection_name.clone();
         let ordering = ordering.clone();
         let result = match operation {
@@ -1004,6 +1007,7 @@ pub async fn search(
     search_points: SearchPoints,
     shard_selection: Option<ShardId>,
     access: Access,
+    service_config: &ServiceConfig,
 ) -> Result<Response<SearchResponse>, Status> {
     let SearchPoints {
         collection_name,
@@ -1053,6 +1057,8 @@ pub async fn search(
 
     let read_consistency = ReadConsistency::try_from_optional(read_consistency)?;
 
+    let hw_measurement_acc = HwMeasurementAcc::new();
+
     let timing = Instant::now();
     let scored_points = do_core_search_points(
         toc,
@@ -1062,6 +1068,7 @@ pub async fn search(
         shard_selector,
         access,
         timeout.map(Duration::from_secs),
+        hw_measurement_acc.clone(),
     )
     .await?;
 
@@ -1071,6 +1078,9 @@ pub async fn search(
             .map(|point| point.into())
             .collect(),
         time: timing.elapsed().as_secs_f64(),
+        usage: service_config
+            .hardware_reporting()
+            .then(|| HardwareUsage::from(hw_measurement_acc)),
     };
 
     Ok(Response::new(response))
@@ -1083,6 +1093,7 @@ pub async fn core_search_batch(
     read_consistency: Option<ReadConsistencyGrpc>,
     access: Access,
     timeout: Option<Duration>,
+    service_config: &ServiceConfig,
 ) -> Result<Response<SearchBatchResponse>, Status> {
     let toc = toc_provider
         .check_strict_mode_batch(
@@ -1096,6 +1107,7 @@ pub async fn core_search_batch(
 
     let read_consistency = ReadConsistency::try_from_optional(read_consistency)?;
 
+    let hw_measurement_acc = HwMeasurementAcc::new();
     let timing = Instant::now();
 
     let scored_points = do_search_batch_points(
@@ -1105,6 +1117,7 @@ pub async fn core_search_batch(
         read_consistency,
         access,
         timeout,
+        hw_measurement_acc.clone(),
     )
     .await?;
 
@@ -1116,11 +1129,15 @@ pub async fn core_search_batch(
             })
             .collect(),
         time: timing.elapsed().as_secs_f64(),
+        usage: service_config
+            .hardware_reporting()
+            .then(|| HardwareUsage::from(hw_measurement_acc)),
     };
 
     Ok(Response::new(response))
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn core_search_list(
     toc: &TableOfContent,
     collection_name: String,
@@ -1129,6 +1146,7 @@ pub async fn core_search_list(
     shard_selection: Option<ShardId>,
     access: Access,
     timeout: Option<Duration>,
+    service_config: &ServiceConfig,
 ) -> Result<Response<SearchBatchResponse>, Status> {
     let searches: Result<Vec<_>, Status> =
         search_points.into_iter().map(TryInto::try_into).collect();
@@ -1151,6 +1169,7 @@ pub async fn core_search_list(
 
     let read_consistency = ReadConsistency::try_from_optional(read_consistency)?;
 
+    let hw_measurement_acc = HwMeasurementAcc::new();
     let scored_points = toc
         .core_search_batch(
             &collection_name,
@@ -1159,6 +1178,7 @@ pub async fn core_search_list(
             shard_selection,
             access,
             timeout,
+            hw_measurement_acc.clone(),
         )
         .await?;
 
@@ -1170,6 +1190,9 @@ pub async fn core_search_list(
             })
             .collect(),
         time: timing.elapsed().as_secs_f64(),
+        usage: service_config
+            .hardware_reporting()
+            .then(|| HardwareUsage::from(hw_measurement_acc)),
     };
 
     Ok(Response::new(response))
@@ -1180,6 +1203,7 @@ pub async fn search_groups(
     search_point_groups: SearchPointGroups,
     shard_selection: Option<ShardId>,
     access: Access,
+    service_config: &ServiceConfig,
 ) -> Result<Response<SearchGroupsResponse>, Status> {
     let search_groups_request = search_point_groups.clone().try_into()?;
 
@@ -1204,6 +1228,8 @@ pub async fn search_groups(
 
     let shard_selector = convert_shard_selector_for_read(shard_selection, shard_key_selector);
 
+    let hw_measuerement_acc = HwMeasurementAcc::new();
+
     let timing = Instant::now();
     let groups_result = crate::common::points::do_search_point_groups(
         toc,
@@ -1213,12 +1239,19 @@ pub async fn search_groups(
         shard_selector,
         access,
         timeout.map(Duration::from_secs),
+        hw_measuerement_acc.clone(),
     )
     .await?;
 
+    let groups_result = GroupsResult::try_from(groups_result)
+        .map_err(|e| Status::internal(format!("Failed to convert groups result: {e}")))?;
+
     let response = SearchGroupsResponse {
-        result: Some(groups_result.into()),
+        result: Some(groups_result),
         time: timing.elapsed().as_secs_f64(),
+        usage: service_config
+            .hardware_reporting()
+            .then(|| HardwareUsage::from(hw_measuerement_acc)),
     };
 
     Ok(Response::new(response))
@@ -1228,6 +1261,7 @@ pub async fn recommend(
     toc_provider: impl CheckedTocProvider,
     recommend_points: RecommendPoints,
     access: Access,
+    service_config: &ServiceConfig,
 ) -> Result<Response<RecommendResponse>, Status> {
     // TODO(luis): check if we can make this into a From impl
     let RecommendPoints {
@@ -1303,6 +1337,7 @@ pub async fn recommend(
     let shard_selector = convert_shard_selector_for_read(None, shard_key_selector);
     let timeout = timeout.map(Duration::from_secs);
 
+    let hw_measurement_acc = HwMeasurementAcc::new();
     let timing = Instant::now();
     let recommended_points = toc
         .recommend(
@@ -1312,6 +1347,7 @@ pub async fn recommend(
             shard_selector,
             access,
             timeout,
+            hw_measurement_acc.clone(),
         )
         .await?;
 
@@ -1321,6 +1357,9 @@ pub async fn recommend(
             .map(|point| point.into())
             .collect(),
         time: timing.elapsed().as_secs_f64(),
+        usage: service_config
+            .hardware_reporting()
+            .then(|| HardwareUsage::from(hw_measurement_acc)),
     };
 
     Ok(Response::new(response))
@@ -1333,6 +1372,7 @@ pub async fn recommend_batch(
     read_consistency: Option<ReadConsistencyGrpc>,
     access: Access,
     timeout: Option<Duration>,
+    service_config: &ServiceConfig,
 ) -> Result<Response<RecommendBatchResponse>, Status> {
     let mut requests = Vec::with_capacity(recommend_points.len());
 
@@ -1356,6 +1396,7 @@ pub async fn recommend_batch(
 
     let read_consistency = ReadConsistency::try_from_optional(read_consistency)?;
 
+    let hw_measurement_acc = HwMeasurementAcc::new();
     let timing = Instant::now();
     let scored_points = toc
         .recommend_batch(
@@ -1364,6 +1405,7 @@ pub async fn recommend_batch(
             read_consistency,
             access,
             timeout,
+            hw_measurement_acc.clone(),
         )
         .await?;
 
@@ -1375,6 +1417,9 @@ pub async fn recommend_batch(
             })
             .collect(),
         time: timing.elapsed().as_secs_f64(),
+        usage: service_config
+            .hardware_reporting()
+            .then(|| HardwareUsage::from(hw_measurement_acc)),
     };
 
     Ok(Response::new(response))
@@ -1384,6 +1429,7 @@ pub async fn recommend_groups(
     toc_provider: impl CheckedTocProvider,
     recommend_point_groups: RecommendPointGroups,
     access: Access,
+    service_config: &ServiceConfig,
 ) -> Result<Response<RecommendGroupsResponse>, Status> {
     let recommend_groups_request = recommend_point_groups.clone().try_into()?;
 
@@ -1408,6 +1454,8 @@ pub async fn recommend_groups(
 
     let shard_selector = convert_shard_selector_for_read(None, shard_key_selector);
 
+    let hw_measurement_acc = HwMeasurementAcc::new();
+
     let timing = Instant::now();
     let groups_result = crate::common::points::do_recommend_point_groups(
         toc,
@@ -1417,12 +1465,19 @@ pub async fn recommend_groups(
         shard_selector,
         access,
         timeout.map(Duration::from_secs),
+        hw_measurement_acc.clone(),
     )
     .await?;
 
+    let groups_result = GroupsResult::try_from(groups_result)
+        .map_err(|e| Status::internal(format!("Failed to convert groups result: {e}")))?;
+
     let response = RecommendGroupsResponse {
-        result: Some(groups_result.into()),
+        result: Some(groups_result),
         time: timing.elapsed().as_secs_f64(),
+        usage: service_config
+            .hardware_reporting()
+            .then(|| HardwareUsage::from(hw_measurement_acc)),
     };
 
     Ok(Response::new(response))
@@ -1432,6 +1487,7 @@ pub async fn discover(
     toc_provider: impl CheckedTocProvider,
     discover_points: DiscoverPoints,
     access: Access,
+    service_config: &ServiceConfig,
 ) -> Result<Response<DiscoverResponse>, Status> {
     let (request, collection_name, read_consistency, timeout, shard_key_selector) =
         try_discover_request_from_grpc(discover_points)?;
@@ -1447,6 +1503,7 @@ pub async fn discover(
 
     let timing = Instant::now();
 
+    let hw_measurement_acc = HwMeasurementAcc::new();
     let shard_selector = convert_shard_selector_for_read(None, shard_key_selector);
 
     let discovered_points = toc
@@ -1457,6 +1514,7 @@ pub async fn discover(
             shard_selector,
             access,
             timeout,
+            hw_measurement_acc.clone(),
         )
         .await?;
 
@@ -1466,6 +1524,9 @@ pub async fn discover(
             .map(|point| point.into())
             .collect(),
         time: timing.elapsed().as_secs_f64(),
+        usage: service_config
+            .hardware_reporting()
+            .then(|| HardwareUsage::from(hw_measurement_acc)),
     };
 
     Ok(Response::new(response))
@@ -1478,6 +1539,7 @@ pub async fn discover_batch(
     read_consistency: Option<ReadConsistencyGrpc>,
     access: Access,
     timeout: Option<Duration>,
+    service_config: &ServiceConfig,
 ) -> Result<Response<DiscoverBatchResponse>, Status> {
     let mut requests = Vec::with_capacity(discover_points.len());
 
@@ -1500,6 +1562,7 @@ pub async fn discover_batch(
         )
         .await?;
 
+    let hw_measurement_acc = HwMeasurementAcc::new();
     let timing = Instant::now();
     let scored_points = toc
         .discover_batch(
@@ -1508,6 +1571,7 @@ pub async fn discover_batch(
             read_consistency,
             access,
             timeout,
+            hw_measurement_acc.clone(),
         )
         .await?;
 
@@ -1519,6 +1583,9 @@ pub async fn discover_batch(
             })
             .collect(),
         time: timing.elapsed().as_secs_f64(),
+        usage: service_config
+            .hardware_reporting()
+            .then(|| HardwareUsage::from(hw_measurement_acc)),
     };
 
     Ok(Response::new(response))
@@ -1583,14 +1650,17 @@ pub async fn scroll(
     )
     .await?;
 
+    let points: Result<_, _> = scrolled_points
+        .points
+        .into_iter()
+        .map(api::grpc::qdrant::RetrievedPoint::try_from)
+        .collect();
+
+    let points = points.map_err(|e| Status::internal(format!("Failed to convert points: {e}")))?;
+
     let response = ScrollResponse {
         next_page_offset: scrolled_points.next_page_offset.map(|n| n.into()),
-        result: scrolled_points
-            .points
-            .into_iter()
-            .map(Record::from)
-            .map(api::grpc::qdrant::RetrievedPoint::from)
-            .collect(),
+        result: points,
         time: timing.elapsed().as_secs_f64(),
     };
 
@@ -1602,6 +1672,7 @@ pub async fn count(
     count_points: CountPoints,
     shard_selection: Option<ShardId>,
     access: &Access,
+    service_config: &ServiceConfig,
 ) -> Result<Response<CountResponse>, Status> {
     let CountPoints {
         collection_name,
@@ -1632,6 +1703,8 @@ pub async fn count(
     let shard_selector = convert_shard_selector_for_read(shard_selection, shard_key_selector);
 
     let timing = Instant::now();
+    let hw_measurement_acc = HwMeasurementAcc::new();
+
     let count_result = do_count_points(
         toc,
         &collection_name,
@@ -1640,12 +1713,16 @@ pub async fn count(
         timeout,
         shard_selector,
         access.clone(),
+        hw_measurement_acc.clone(),
     )
     .await?;
 
     let response = CountResponse {
         result: Some(count_result.into()),
         time: timing.elapsed().as_secs_f64(),
+        usage: service_config
+            .hardware_reporting()
+            .then(|| HardwareUsage::from(hw_measurement_acc)),
     };
 
     Ok(Response::new(response))
@@ -1718,6 +1795,7 @@ pub async fn query(
     query_points: QueryPoints,
     shard_selection: Option<ShardId>,
     access: Access,
+    service_config: &ServiceConfig,
 ) -> Result<Response<QueryResponse>, Status> {
     let shard_key_selector = query_points.shard_key_selector.clone();
     let shard_selector = convert_shard_selector_for_read(shard_selection, shard_key_selector);
@@ -1728,7 +1806,7 @@ pub async fn query(
         .transpose()?;
     let collection_name = query_points.collection_name.clone();
     let timeout = query_points.timeout;
-    let request = CollectionQueryRequest::try_from(query_points)?;
+    let request = convert_query_points_from_grpc(query_points)?;
 
     let toc = toc_provider
         .check_strict_mode(
@@ -1741,6 +1819,7 @@ pub async fn query(
 
     let timeout = timeout.map(Duration::from_secs);
 
+    let hw_measurement_acc = HwMeasurementAcc::new();
     let timing = Instant::now();
     let scored_points = do_query_points(
         toc,
@@ -1750,6 +1829,7 @@ pub async fn query(
         shard_selector,
         access,
         timeout,
+        hw_measurement_acc.clone(),
     )
     .await?;
 
@@ -1759,6 +1839,9 @@ pub async fn query(
             .map(|point| point.into())
             .collect(),
         time: timing.elapsed().as_secs_f64(),
+        usage: service_config
+            .hardware_reporting()
+            .then(|| HardwareUsage::from(hw_measurement_acc)),
     };
 
     Ok(Response::new(response))
@@ -1771,13 +1854,14 @@ pub async fn query_batch(
     read_consistency: Option<ReadConsistencyGrpc>,
     access: Access,
     timeout: Option<Duration>,
+    service_config: &ServiceConfig,
 ) -> Result<Response<QueryBatchResponse>, Status> {
     let read_consistency = ReadConsistency::try_from_optional(read_consistency)?;
     let mut requests = Vec::with_capacity(points.len());
     for query_points in points {
         let shard_key_selector = query_points.shard_key_selector.clone();
         let shard_selector = convert_shard_selector_for_read(None, shard_key_selector);
-        let request = CollectionQueryRequest::try_from(query_points)?;
+        let request = convert_query_points_from_grpc(query_points)?;
         requests.push((request, shard_selector));
     }
 
@@ -1791,6 +1875,7 @@ pub async fn query_batch(
         )
         .await?;
 
+    let hw_measurement_acc = HwMeasurementAcc::new();
     let timing = Instant::now();
     let scored_points = do_query_batch_points(
         toc,
@@ -1799,6 +1884,7 @@ pub async fn query_batch(
         read_consistency,
         access,
         timeout,
+        hw_measurement_acc.clone(),
     )
     .await?;
 
@@ -1810,6 +1896,9 @@ pub async fn query_batch(
             })
             .collect(),
         time: timing.elapsed().as_secs_f64(),
+        usage: service_config
+            .hardware_reporting()
+            .then(|| HardwareUsage::from(hw_measurement_acc)),
     };
 
     Ok(Response::new(response))
@@ -1820,6 +1909,7 @@ pub async fn query_groups(
     query_points: QueryPointGroups,
     shard_selection: Option<ShardId>,
     access: Access,
+    service_config: &ServiceConfig,
 ) -> Result<Response<QueryGroupsResponse>, Status> {
     let shard_key_selector = query_points.shard_key_selector.clone();
     let shard_selector = convert_shard_selector_for_read(shard_selection, shard_key_selector);
@@ -1830,7 +1920,7 @@ pub async fn query_groups(
         .transpose()?;
     let timeout = query_points.timeout;
     let collection_name = query_points.collection_name.clone();
-    let request = CollectionQueryGroupsRequest::try_from(query_points)?;
+    let request = convert_query_point_groups_from_grpc(query_points).await?;
 
     let toc = toc_provider
         .check_strict_mode(
@@ -1843,6 +1933,8 @@ pub async fn query_groups(
 
     let timeout = timeout.map(Duration::from_secs);
     let timing = Instant::now();
+
+    let hw_measurement_acc = HwMeasurementAcc::new();
     let groups_result = do_query_point_groups(
         toc,
         &collection_name,
@@ -1851,12 +1943,19 @@ pub async fn query_groups(
         shard_selector,
         access,
         timeout,
+        hw_measurement_acc.clone(),
     )
     .await?;
 
+    let grpc_group_result = GroupsResult::try_from(groups_result)
+        .map_err(|err| Status::internal(format!("failed to convert result: {err}")))?;
+
     let response = QueryGroupsResponse {
-        result: Some(groups_result.into()),
+        result: Some(grpc_group_result),
         time: timing.elapsed().as_secs_f64(),
+        usage: service_config
+            .hardware_reporting()
+            .then(|| HardwareUsage::from(hw_measurement_acc)),
     };
 
     Ok(Response::new(response))
@@ -1929,6 +2028,7 @@ pub async fn search_points_matrix(
     toc_provider: impl CheckedTocProvider,
     search_matrix_points: SearchMatrixPoints,
     access: Access,
+    hw_measurement_acc: HwMeasurementAcc,
 ) -> Result<CollectionSearchMatrixResponse, Status> {
     let SearchMatrixPoints {
         collection_name,
@@ -1978,6 +2078,7 @@ pub async fn search_points_matrix(
             shard_selector,
             access,
             timeout,
+            hw_measurement_acc,
         )
         .await?;
 

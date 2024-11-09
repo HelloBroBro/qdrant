@@ -18,6 +18,7 @@ use api::grpc::qdrant::{
 };
 use api::grpc::transport_channel_pool::{AddTimeout, MAX_GRPC_CHANNEL_TIMEOUT};
 use async_trait::async_trait;
+use common::counter::hardware_accumulator::HwMeasurementAcc;
 use common::types::TelemetryDetail;
 use itertools::Itertools;
 use parking_lot::Mutex;
@@ -46,7 +47,7 @@ use crate::operations::point_ops::{PointOperations, WriteOrdering};
 use crate::operations::snapshot_ops::SnapshotPriority;
 use crate::operations::types::{
     CollectionError, CollectionInfo, CollectionResult, CoreSearchRequest, CoreSearchRequestBatch,
-    CountRequestInternal, CountResult, PointRequestInternal, Record, UpdateResult,
+    CountRequestInternal, CountResult, PointRequestInternal, RecordInternal, UpdateResult,
 };
 use crate::operations::universal_query::shard_query::{ShardQueryRequest, ShardQueryResponse};
 use crate::operations::vector_ops::VectorOperations;
@@ -323,7 +324,7 @@ impl RemoteShard {
                         update_operation,
                         wait,
                         ordering,
-                    );
+                    )?;
                     self.with_points_client(|mut client| async move {
                         client
                             .update_vectors(tonic::Request::new(request.clone()))
@@ -662,7 +663,7 @@ impl ShardOperation for RemoteShard {
         _search_runtime_handle: &Handle,
         order_by: Option<&OrderBy>,
         timeout: Option<Duration>,
-    ) -> CollectionResult<Vec<Record>> {
+    ) -> CollectionResult<Vec<RecordInternal>> {
         let scroll_points = ScrollPoints {
             collection_name: self.collection_id.clone(),
             filter: filter.map(|f| f.clone().into()),
@@ -694,7 +695,7 @@ impl ShardOperation for RemoteShard {
         // We need the `____ordered_with____` value even if the user didn't request payload
         let parse_payload = with_payload_interface.is_required() || order_by.is_some();
 
-        let result: Result<Vec<Record>, Status> = scroll_response
+        let result: Result<Vec<RecordInternal>, Status> = scroll_response
             .result
             .into_iter()
             .map(|point| try_record_from_grpc(point, parse_payload))
@@ -726,6 +727,7 @@ impl ShardOperation for RemoteShard {
         batch_request: Arc<CoreSearchRequestBatch>,
         _search_runtime_handle: &Handle,
         timeout: Option<Duration>,
+        hw_measurement_acc: HwMeasurementAcc,
     ) -> CollectionResult<Vec<Vec<ScoredPoint>>> {
         let mut timer = ScopeDurationMeasurer::new(&self.telemetry_search_durations);
         timer.set_success(false);
@@ -754,6 +756,8 @@ impl ShardOperation for RemoteShard {
             })
             .await?
             .into_inner();
+
+        hw_measurement_acc.merge_from_cell(search_batch_response.usage);
 
         let result: Result<Vec<Vec<ScoredPoint>>, Status> = search_batch_response
             .result
@@ -784,6 +788,7 @@ impl ShardOperation for RemoteShard {
         request: Arc<CountRequestInternal>,
         _search_runtime_handle: &Handle,
         timeout: Option<Duration>,
+        hw_measurement_acc: HwMeasurementAcc,
     ) -> CollectionResult<CountResult> {
         let count_points = CountPoints {
             collection_name: self.collection_id.clone(),
@@ -808,6 +813,9 @@ impl ShardOperation for RemoteShard {
             })
             .await?
             .into_inner();
+
+        hw_measurement_acc.merge_from_cell(count_response.usage);
+
         count_response.result.map_or_else(
             || {
                 Err(CollectionError::service_error(
@@ -825,7 +833,7 @@ impl ShardOperation for RemoteShard {
         with_vector: &WithVector,
         _search_runtime_handle: &Handle,
         timeout: Option<Duration>,
-    ) -> CollectionResult<Vec<Record>> {
+    ) -> CollectionResult<Vec<RecordInternal>> {
         let get_points = GetPoints {
             collection_name: self.collection_id.clone(),
             ids: request.ids.iter().copied().map(|v| v.into()).collect(),
@@ -851,7 +859,7 @@ impl ShardOperation for RemoteShard {
             .await?
             .into_inner();
 
-        let result: Result<Vec<Record>, Status> = get_response
+        let result: Result<Vec<RecordInternal>, Status> = get_response
             .result
             .into_iter()
             .map(|point| try_record_from_grpc(point, with_payload.enable))
@@ -865,6 +873,7 @@ impl ShardOperation for RemoteShard {
         requests: Arc<Vec<ShardQueryRequest>>,
         _search_runtime_handle: &Handle,
         timeout: Option<Duration>,
+        hw_measurement_acc: HwMeasurementAcc,
     ) -> CollectionResult<Vec<ShardQueryResponse>> {
         let mut timer = ScopeDurationMeasurer::new(&self.telemetry_search_durations);
         timer.set_success(false);
@@ -895,6 +904,8 @@ impl ShardOperation for RemoteShard {
             })
             .await?
             .into_inner();
+
+        hw_measurement_acc.merge_from_cell(batch_response.usage);
 
         let result = batch_response
             .results

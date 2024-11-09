@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::path::PathBuf;
 
 use common::types::PointOffsetType;
 use serde_json::Value;
@@ -73,6 +74,23 @@ impl PayloadStorage for InMemoryPayloadStorage {
     fn flusher(&self) -> Flusher {
         Box::new(|| Ok(()))
     }
+
+    fn iter<F>(&self, mut callback: F) -> OperationResult<()>
+    where
+        F: FnMut(PointOffsetType, &Payload) -> OperationResult<bool>,
+    {
+        for (key, val) in self.payload.iter() {
+            let do_continue = callback(*key, val)?;
+            if !do_continue {
+                return Ok(());
+            }
+        }
+        Ok(())
+    }
+
+    fn files(&self) -> Vec<PathBuf> {
+        vec![]
+    }
 }
 
 #[cfg(test)]
@@ -132,6 +150,7 @@ mod tests {
                 payload.borrow().as_ref().cloned().unwrap()
             }),
             Some(&id_tracker),
+            &HashMap::new(),
             &query,
             0,
             &IndexesMap::new(),

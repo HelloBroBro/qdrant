@@ -21,7 +21,7 @@ testing = ["common/testing", "sparse/testing"]
 cc = "1.1"
 
 [dev-dependencies]
-criterion = "0.5"
+criterion = { workspace = true }
 dataset = { path = "../common/dataset" }
 env_logger = "0.11"
 indicatif = { workspace = true }
@@ -52,14 +52,14 @@ serde_cbor = { workspace = true }
 serde-value = "0.7"
 serde_variant = { workspace = true }
 serde-untagged = "0.1.6"
-ordered-float = "4.3"
+ordered-float = { workspace = true }
 thiserror = { workspace = true }
 atomic_refcell = { workspace = true }
 atomicwrites = { workspace = true }
 memmap2 = { workspace = true }
 schemars = { workspace = true }
 log = { workspace = true }
-geo = "0.28.0"
+geo = "0.29.1"
 geohash = "0.13.1"
 num-traits = { workspace = true }
 num-derive = "0.4.2"
@@ -73,7 +73,7 @@ fs_extra = "1.3.0"
 tinyvec = { version = "1.8.0", features = ["alloc"] }
 validator = { workspace = true }
 chrono = { workspace = true }
-smol_str = { version = "0.3.1", features = ["serde"] }
+smol_str = { version = "0.3.2", features = ["serde"] }
 fnv = { workspace = true }
 indexmap = { workspace = true }
 ahash = { version = "0.8.11", features = ["serde"] }
@@ -97,7 +97,6 @@ sparse = { path = "../sparse" }
 
 tracing = { workspace = true, optional = true }
 macro_rules_attribute = "0.2.0"
-generic-tests = { workspace = true }
 nom = "7.1.3"
 half = { workspace = true }
 merge = { workspace = true }
@@ -105,7 +104,7 @@ merge = { workspace = true }
 [target.'cfg(target_os = "linux")'.dependencies]
 cgroups-rs = "0.3"
 procfs = { version = "0.17", default-features = false }
-io-uring = "0.7.0"
+io-uring = "0.7.1"
 
 [[bench]]
 name = "vector_search"

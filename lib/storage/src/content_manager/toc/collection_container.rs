@@ -133,6 +133,24 @@ impl TableOfContent {
             let mut collections = self.collections.write().await;
 
             for (id, state) in &data.collections {
+                if let Some(collection) = collections.get(id) {
+                    if let Err(err) = collection.check_config_compatible(&state.config).await {
+                        log::warn!(
+                            "Recreating collection {id}, because collection config is incompatible: \
+                             {err}",
+                        );
+
+                        // Drop `collections` lock
+                        drop(collections);
+
+                        // Delete collection
+                        self.delete_collection(id).await?;
+
+                        // Re-acquire `collections` lock 🙄
+                        collections = self.collections.write().await;
+                    }
+                }
+
                 let collection_exists = collections.contains_key(id);
 
                 // Create collection if not present locally
@@ -152,11 +170,10 @@ impl TableOfContent {
                             .into(),
                         shard_distribution,
                         self.channel_service.clone(),
-                        Self::change_peer_state_callback(
+                        Self::change_peer_from_state_callback(
                             self.consensus_proposal_sender.clone(),
                             id.to_string(),
                             ReplicaState::Dead,
-                            None,
                         ),
                         Self::request_shard_transfer_callback(
                             self.consensus_proposal_sender.clone(),
@@ -172,7 +189,7 @@ impl TableOfContent {
                         self.storage_config.optimizers_overwrite.clone(),
                     )
                     .await?;
-                    collections.validate_collection_not_exists(id).await?;
+                    collections.validate_collection_not_exists(id)?;
                     collections.insert(id.to_string(), collection);
                 }
 
@@ -222,8 +239,14 @@ impl TableOfContent {
                 }
             }
 
-            // Remove collections that are present locally but are not in the snapshot state
-            for collection_name in collections.keys() {
+            // Collect names of collections that are present locally
+            let collection_names: Vec<_> = collections.keys().cloned().collect();
+
+            // Drop `collections` lock
+            drop(collections);
+
+            // Remove collections that are present locally, but are not in the snapshot state
+            for collection_name in &collection_names {
                 if !data.collections.contains_key(collection_name) {
                     log::debug!(
                         "Deleting collection {collection_name} \

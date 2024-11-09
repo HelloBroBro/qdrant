@@ -1,6 +1,7 @@
 use std::cmp;
 use std::sync::Arc;
 
+use common::counter::hardware_accumulator::HwMeasurementAcc;
 use futures::{future, TryStreamExt as _};
 use lazy_static::lazy_static;
 use segment::types::{QuantizationConfig, StrictModeConfig};
@@ -162,6 +163,23 @@ impl Collection {
         Ok(())
     }
 
+    /// Updates the strict mode configuration and saves it to disk.
+    pub async fn update_strict_mode_config(
+        &self,
+        strict_mode_diff: StrictModeConfig,
+    ) -> CollectionResult<()> {
+        {
+            let mut config = self.collection_config.write().await;
+            if let Some(current_config) = config.strict_mode_config.as_mut() {
+                *current_config = strict_mode_diff.update(current_config)?;
+            } else {
+                config.strict_mode_config = Some(strict_mode_diff);
+            }
+        }
+        self.collection_config.read().await.save(&self.path)?;
+        Ok(())
+    }
+
     /// Handle replica changes
     ///
     /// add and remove replicas from replica set
@@ -180,7 +198,7 @@ impl Collection {
                 Change::Remove(shard_id, peer_id) => (shard_id, peer_id),
             };
 
-            let Some(replica_set) = shard_holder.get_shard(&shard_id) else {
+            let Some(replica_set) = shard_holder.get_shard(shard_id) else {
                 return Err(CollectionError::BadRequest {
                     description: format!("Shard {} of {} not found", shard_id, self.name()),
                 });
@@ -315,7 +333,6 @@ impl Collection {
 
         // extract shards info
         for (shard_id, replica_set) in shards_holder.get_shards() {
-            let shard_id = *shard_id;
             let peers = replica_set.peers();
 
             if replica_set.has_local_shard().await {
@@ -324,7 +341,7 @@ impl Collection {
                     .copied()
                     .unwrap_or(ReplicaState::Dead);
                 let count_result = replica_set
-                    .count_local(count_request.clone(), None)
+                    .count_local(count_request.clone(), None, HwMeasurementAcc::new())
                     .await
                     .unwrap_or_default();
                 let points_count = count_result.map(|x| x.count).unwrap_or(0);

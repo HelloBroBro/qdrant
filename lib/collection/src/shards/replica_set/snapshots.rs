@@ -141,17 +141,21 @@ impl ShardReplicaSet {
                 // TODO: Handle single-node mode!? (How!? 😰)
 
                 // Mark this peer as "locally disabled"...
-                let has_other_active_peers = self.active_remote_shards().await.is_empty();
+                let has_other_active_peers = self.active_remote_shards().is_empty();
 
                 // ...if this peer is *not* the last active replica
                 if has_other_active_peers {
                     let notify = self
                         .locally_disabled_peers
                         .write()
-                        .disable_peer_and_notify_if_elapsed(self.this_peer_id());
+                        .disable_peer_and_notify_if_elapsed(self.this_peer_id(), None);
 
                     if notify {
-                        self.notify_peer_failure_cb.deref()(self.this_peer_id(), self.shard_id);
+                        self.notify_peer_failure_cb.deref()(
+                            self.this_peer_id(),
+                            self.shard_id,
+                            None,
+                        );
                     }
                 }
 
