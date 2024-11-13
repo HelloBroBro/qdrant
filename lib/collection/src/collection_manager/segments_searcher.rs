@@ -77,7 +77,7 @@ impl SegmentsSearcher {
     pub(crate) fn process_search_result_step1(
         search_result: BatchSearchResult,
         limits: Vec<usize>,
-        further_results: Vec<Vec<bool>>,
+        further_results: &[Vec<bool>],
     ) -> (
         BatchResultAggregator,
         HashMap<SegmentOffset, Vec<BatchOffset>>,
@@ -294,7 +294,7 @@ impl SegmentsSearcher {
                 .iter()
                 .map(|request| request.limit + request.offset)
                 .collect(),
-            further_results,
+            &further_results,
         );
         // The second step of the search is to re-run the search without sampling on some segments
         // Expected that this stage will be executed rarely
@@ -590,7 +590,7 @@ fn search_in_segment(
 
         let query = search_query.query.clone().into();
 
-        // same params enables batching
+        // same params enables batching (cmp expensive on large filters)
         if params == prev_params {
             vectors_batch.push(query);
         } else {

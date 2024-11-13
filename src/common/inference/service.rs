@@ -93,7 +93,7 @@ impl From<InferenceData> for InferenceInput {
                     options,
                 } = img;
                 InferenceInput {
-                    data: Value::String(image),
+                    data: image,
                     data_type: IMAGE_DATA_TYPE.to_string(),
                     model: model.unwrap_or_default(),
                     options: options.options,
@@ -125,10 +125,11 @@ static INFERENCE_SERVICE: RwLock<Option<Arc<InferenceService>>> = RwLock::new(No
 
 impl InferenceService {
     pub fn new(config: InferenceConfig) -> Self {
+        let timeout = Duration::from_secs(config.timeout);
         Self {
-            config: config.clone(),
+            config,
             client: Client::builder()
-                .timeout(Duration::from_secs(config.timeout))
+                .timeout(timeout)
                 .build()
                 .expect("Invalid timeout value for HTTP client"),
         }

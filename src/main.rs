@@ -161,7 +161,13 @@ fn main() -> anyhow::Result<()> {
     setup_panic_hook(reporting_enabled, reporting_id.to_string());
 
     memory::madvise::set_global(settings.storage.mmap_advice);
-    segment::vector_storage::common::set_async_scorer(settings.storage.async_scorer);
+    segment::vector_storage::common::set_async_scorer(
+        settings
+            .storage
+            .performance
+            .async_scorer
+            .unwrap_or_default(),
+    );
 
     welcome(&settings);
 
@@ -324,7 +330,7 @@ fn main() -> anyhow::Result<()> {
         let health_checker = Arc::new(common::health::HealthChecker::spawn(
             toc_arc.clone(),
             consensus_state.clone(),
-            runtime_handle.clone(),
+            &runtime_handle,
             // NOTE: `wait_for_bootstrap` should be calculated *before* starting `Consensus` thread
             consensus_state.is_new_deployment() && args.bootstrap.is_some(),
         ));

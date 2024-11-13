@@ -6724,8 +6724,8 @@
             "nullable": true
           },
           "on_disk_payload": {
-            "description": "If true - point's payload will not be stored in memory. It will be read from the disk every time it is requested. This setting saves RAM by (slightly) increasing the response time. Note: those payload values that are involved in filtering and are indexed - remain in RAM.",
-            "default": false,
+            "description": "If true - point's payload will not be stored in memory. It will be read from the disk every time it is requested. This setting saves RAM by (slightly) increasing the response time. Note: those payload values that are involved in filtering and are indexed - remain in RAM.\n\nDefault: true",
+            "default": true,
             "type": "boolean"
           },
           "sparse_vectors": {
@@ -9186,7 +9186,7 @@
             "nullable": true
           },
           "on_disk_payload": {
-            "description": "If true - point's payload will not be stored in memory. It will be read from the disk every time it is requested. This setting saves RAM by (slightly) increasing the response time. Note: those payload values that are involved in filtering and are indexed - remain in RAM.",
+            "description": "If true - point's payload will not be stored in memory. It will be read from the disk every time it is requested. This setting saves RAM by (slightly) increasing the response time. Note: those payload values that are involved in filtering and are indexed - remain in RAM.\n\nDefault: true",
             "default": null,
             "type": "boolean",
             "nullable": true
@@ -9971,8 +9971,7 @@
         ],
         "properties": {
           "image": {
-            "description": "Image data: base64 encoded image or an URL",
-            "type": "string"
+            "description": "Image data: base64 encoded image or an URL"
           },
           "model": {
             "description": "Name of the model used to generate the vector List of available models depends on a provider",
@@ -11095,6 +11094,10 @@
           },
           "optimizations": {
             "$ref": "#/components/schemas/OptimizerTelemetry"
+          },
+          "async_scorer": {
+            "type": "boolean",
+            "nullable": true
           }
         }
       },
