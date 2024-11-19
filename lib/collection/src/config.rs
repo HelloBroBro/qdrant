@@ -17,6 +17,7 @@ use segment::types::{
     VectorStorageDatatype, VectorStorageType,
 };
 use serde::{Deserialize, Serialize};
+use uuid::Uuid;
 use validator::Validate;
 use wal::WalOptions;
 
@@ -104,6 +105,10 @@ pub struct CollectionParams {
     /// Default: true
     #[serde(default = "default_on_disk_payload")]
     pub on_disk_payload: bool,
+    /// Temporary setting to enable/disable the use of mmap for on-disk payload storage.
+    // TODO: remove this setting after integration is finished
+    #[serde(skip)]
+    pub on_disk_payload_uses_mmap: bool,
     /// Configuration of the sparse vector storage
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[validate(nested)]
@@ -113,6 +118,9 @@ pub struct CollectionParams {
 impl CollectionParams {
     pub fn payload_storage_type(&self) -> PayloadStorageType {
         if self.on_disk_payload {
+            if self.on_disk_payload_uses_mmap {
+                return PayloadStorageType::Mmap;
+            }
             PayloadStorageType::OnDisk
         } else {
             PayloadStorageType::InMemory
@@ -128,6 +136,7 @@ impl CollectionParams {
             write_consistency_factor: _, // May be changed
             read_fan_out_factor: _, // May be changed
             on_disk_payload: _, // May be changed
+            on_disk_payload_uses_mmap: _, // Temporary
             sparse_vectors,  // Parameters may be changes, but not the structure
         } = other;
 
@@ -178,6 +187,7 @@ impl Anonymize for CollectionParams {
             write_consistency_factor: self.write_consistency_factor,
             read_fan_out_factor: self.read_fan_out_factor,
             on_disk_payload: self.on_disk_payload,
+            on_disk_payload_uses_mmap: self.on_disk_payload_uses_mmap,
             sparse_vectors: self.sparse_vectors.anonymize(),
         }
     }
@@ -200,7 +210,7 @@ pub const fn default_on_disk_payload() -> bool {
 }
 
 #[derive(Debug, Deserialize, Serialize, JsonSchema, Validate, Clone, PartialEq)]
-pub struct CollectionConfig {
+pub struct CollectionConfigInternal {
     #[validate(nested)]
     pub params: CollectionParams,
     #[validate(nested)]
@@ -211,13 +221,13 @@ pub struct CollectionConfig {
     pub wal_config: WalConfig,
     #[serde(default)]
     pub quantization_config: Option<QuantizationConfig>,
-    #[serde(default)]
-    #[schemars(skip)]
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub strict_mode_config: Option<StrictModeConfig>,
+    #[serde(default)]
+    pub uuid: Option<Uuid>,
 }
 
-impl CollectionConfig {
+impl CollectionConfigInternal {
     pub fn to_bytes(&self) -> CollectionResult<Vec<u8>> {
         serde_json::to_vec(self).map_err(|err| CollectionError::service_error(err.to_string()))
     }
@@ -263,6 +273,7 @@ impl CollectionParams {
             write_consistency_factor: default_write_consistency_factor(),
             read_fan_out_factor: None,
             on_disk_payload: default_on_disk_payload(),
+            on_disk_payload_uses_mmap: false,
             sparse_vectors: None,
         }
     }

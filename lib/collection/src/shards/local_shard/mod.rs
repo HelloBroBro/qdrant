@@ -28,8 +28,8 @@ use segment::index::field_index::CardinalityEstimation;
 use segment::segment::Segment;
 use segment::segment_constructor::{build_segment, load_segment};
 use segment::types::{
-    CompressionRatio, Filter, PayloadIndexInfo, PayloadKeyType, PayloadStorageType, PointIdType,
-    QuantizationConfig, SegmentConfig, SegmentType, SnapshotFormat,
+    CompressionRatio, Filter, PayloadIndexInfo, PayloadKeyType, PointIdType, QuantizationConfig,
+    SegmentConfig, SegmentType, SnapshotFormat,
 };
 use segment::utils::mem::Mem;
 use segment::vector_storage::common::get_async_scorer;
@@ -50,7 +50,7 @@ use crate::collection_manager::holders::segment_holder::{
 use crate::collection_manager::optimizers::TrackerLog;
 use crate::collection_manager::segments_searcher::SegmentsSearcher;
 use crate::common::file_utils::{move_dir, move_file};
-use crate::config::CollectionConfig;
+use crate::config::CollectionConfigInternal;
 use crate::operations::shared_storage_config::SharedStorageConfig;
 use crate::operations::types::{
     check_sparse_compatible_with_segment_config, CollectionError, CollectionResult,
@@ -81,7 +81,7 @@ const SEGMENTS_PATH: &str = "segments";
 /// Holds all object, required for collection functioning
 pub struct LocalShard {
     pub(super) segments: LockedSegmentHolder,
-    pub(super) collection_config: Arc<TokioRwLock<CollectionConfig>>,
+    pub(super) collection_config: Arc<TokioRwLock<CollectionConfigInternal>>,
     pub(super) shared_storage_config: Arc<SharedStorageConfig>,
     pub(crate) payload_index_schema: Arc<SaveOnDisk<PayloadIndexSchema>>,
     pub(super) wal: RecoverableWal,
@@ -144,7 +144,7 @@ impl LocalShard {
     #[allow(clippy::too_many_arguments)]
     pub async fn new(
         segment_holder: SegmentHolder,
-        collection_config: Arc<TokioRwLock<CollectionConfig>>,
+        collection_config: Arc<TokioRwLock<CollectionConfigInternal>>,
         shared_storage_config: Arc<SharedStorageConfig>,
         payload_index_schema: Arc<SaveOnDisk<PayloadIndexSchema>>,
         wal: SerdeWal<OperationWithClockTag>,
@@ -224,7 +224,7 @@ impl LocalShard {
         id: ShardId,
         collection_id: CollectionId,
         shard_path: &Path,
-        collection_config: Arc<TokioRwLock<CollectionConfig>>,
+        collection_config: Arc<TokioRwLock<CollectionConfigInternal>>,
         effective_optimizers_config: OptimizersConfig,
         shared_storage_config: Arc<SharedStorageConfig>,
         payload_index_schema: Arc<SaveOnDisk<PayloadIndexSchema>>,
@@ -413,7 +413,7 @@ impl LocalShard {
         id: ShardId,
         collection_id: CollectionId,
         shard_path: &Path,
-        collection_config: Arc<TokioRwLock<CollectionConfig>>,
+        collection_config: Arc<TokioRwLock<CollectionConfigInternal>>,
         shared_storage_config: Arc<SharedStorageConfig>,
         payload_index_schema: Arc<SaveOnDisk<PayloadIndexSchema>>,
         update_runtime: Handle,
@@ -446,7 +446,7 @@ impl LocalShard {
         id: ShardId,
         collection_id: CollectionId,
         shard_path: &Path,
-        collection_config: Arc<TokioRwLock<CollectionConfig>>,
+        collection_config: Arc<TokioRwLock<CollectionConfigInternal>>,
         shared_storage_config: Arc<SharedStorageConfig>,
         payload_index_schema: Arc<SaveOnDisk<PayloadIndexSchema>>,
         update_runtime: Handle,
@@ -484,11 +484,7 @@ impl LocalShard {
             let segment_config = SegmentConfig {
                 vector_data: vector_params.clone(),
                 sparse_vector_data: sparse_vector_params.clone(),
-                payload_storage_type: if config.params.on_disk_payload {
-                    PayloadStorageType::OnDisk
-                } else {
-                    PayloadStorageType::InMemory
-                },
+                payload_storage_type: config.params.payload_storage_type(),
             };
             let segment = thread::Builder::new()
                 .name(format!("shard-build-{collection_id}-{id}"))

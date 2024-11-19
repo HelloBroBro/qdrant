@@ -2,7 +2,7 @@ use std::collections::HashSet;
 
 use api::rest::{
     ContextInput, ContextPair, DiscoverInput, Prefetch, Query, QueryGroupsRequestInternal,
-    QueryInterface, RecommendInput, VectorInput,
+    QueryInterface, QueryRequestInternal, RecommendInput, VectorInput,
 };
 
 use super::service::{InferenceData, InferenceInput, InferenceRequest};
@@ -161,6 +161,36 @@ pub fn collect_query_groups_request(request: &QueryGroupsRequestInternal) -> Bat
     batch
 }
 
+pub fn collect_query_request(request: &QueryRequestInternal) -> BatchAccum {
+    let mut batch = BatchAccum::new();
+
+    let QueryRequestInternal {
+        prefetch,
+        query,
+        using: _,
+        filter: _,
+        score_threshold: _,
+        params: _,
+        limit: _,
+        offset: _,
+        with_vector: _,
+        with_payload: _,
+        lookup_from: _,
+    } = request;
+
+    if let Some(query) = query {
+        collect_query_interface(query, &mut batch);
+    }
+
+    if let Some(prefetches) = prefetch {
+        for prefetch in prefetches {
+            collect_prefetch(prefetch, &mut batch);
+        }
+    }
+
+    batch
+}
+
 #[cfg(test)]
 mod tests {
     use api::rest::schema::{DiscoverQuery, Document, Image, InferenceObject, NearestQuery};
@@ -172,7 +202,7 @@ mod tests {
     fn create_test_document(text: &str) -> Document {
         Document {
             text: text.to_string(),
-            model: Some("test-model".to_string()),
+            model: "test-model".to_string(),
             options: Default::default(),
         }
     }
@@ -180,7 +210,7 @@ mod tests {
     fn create_test_image(url: &str) -> Image {
         Image {
             image: json!({"data": url.to_string()}),
-            model: Some("test-model".to_string()),
+            model: "test-model".to_string(),
             options: Default::default(),
         }
     }
@@ -188,7 +218,7 @@ mod tests {
     fn create_test_object(data: &str) -> InferenceObject {
         InferenceObject {
             object: json!({"data": data}),
-            model: Some("test-model".to_string()),
+            model: "test-model".to_string(),
             options: Default::default(),
         }
     }
@@ -329,8 +359,8 @@ mod tests {
 
         let mut doc1 = create_test_document("same");
         let mut doc2 = create_test_document("same");
-        doc1.model = Some("model1".to_string());
-        doc2.model = Some("model2".to_string());
+        doc1.model = "model1".to_string();
+        doc2.model = "model2".to_string();
 
         batch.add(InferenceData::Document(doc1));
         batch.add(InferenceData::Document(doc2));

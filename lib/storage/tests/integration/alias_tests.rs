@@ -37,6 +37,7 @@ fn test_alias_operation() {
         snapshots_config: Default::default(),
         temp_path: None,
         on_disk_payload: false,
+        on_disk_payload_uses_mmap: false,
         optimizers: OptimizersConfig {
             deleted_threshold: 0.5,
             vacuum_min_vector_number: 100,
@@ -114,6 +115,7 @@ fn test_alias_operation() {
                         quantization_config: None,
                         sharding_method: None,
                         strict_mode_config: None,
+                        uuid: None,
                     },
                 )),
                 FULL_ACCESS,

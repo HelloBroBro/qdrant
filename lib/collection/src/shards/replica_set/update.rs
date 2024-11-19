@@ -276,8 +276,8 @@ impl ShardReplicaSet {
             None => FuturesUnordered::from_iter(update_futures).collect().await,
         };
 
-        drop(remotes);
         drop(local);
+        drop(remotes);
 
         let write_consistency_factor = self
             .collection_config
@@ -608,13 +608,14 @@ mod tests {
             ..CollectionParams::empty()
         };
 
-        let config = CollectionConfig {
+        let config = CollectionConfigInternal {
             params: collection_params,
             optimizer_config: TEST_OPTIMIZERS_CONFIG.clone(),
             wal_config,
             hnsw_config: Default::default(),
             quantization_config: None,
             strict_mode_config: None,
+            uuid: None,
         };
 
         let payload_index_schema_dir = Builder::new().prefix("qdrant-test").tempdir().unwrap();

@@ -1,8 +1,9 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::mem;
 use std::sync::Arc;
 use std::time::Duration;
 
+use ahash::AHashSet;
 use common::counter::hardware_accumulator::HwMeasurementAcc;
 use futures::{future, TryFutureExt};
 use itertools::{Either, Itertools};
@@ -25,7 +26,7 @@ impl Collection {
         read_consistency: Option<ReadConsistency>,
         shard_selection: &ShardSelectorInternal,
         timeout: Option<Duration>,
-        hw_measurement_acc: HwMeasurementAcc,
+        hw_measurement_acc: &HwMeasurementAcc,
     ) -> CollectionResult<Vec<ScoredPoint>> {
         if request.limit == 0 {
             return Ok(vec![]);
@@ -52,7 +53,7 @@ impl Collection {
         read_consistency: Option<ReadConsistency>,
         shard_selection: ShardSelectorInternal,
         timeout: Option<Duration>,
-        hw_measurement_acc: HwMeasurementAcc,
+        hw_measurement_acc: &HwMeasurementAcc,
     ) -> CollectionResult<Vec<Vec<ScoredPoint>>> {
         let start = Instant::now();
         // shortcuts batch if all requests with limit=0
@@ -147,7 +148,7 @@ impl Collection {
         read_consistency: Option<ReadConsistency>,
         shard_selection: &ShardSelectorInternal,
         timeout: Option<Duration>,
-        hw_measurement_acc: HwMeasurementAcc,
+        hw_measurement_acc: &HwMeasurementAcc,
     ) -> CollectionResult<Vec<Vec<ScoredPoint>>> {
         let request = Arc::new(request);
 
@@ -157,15 +158,15 @@ impl Collection {
         let all_searches_res = {
             let shard_holder = self.shards_holder.read().await;
             let target_shards = shard_holder.select_shards(shard_selection)?;
-            let all_searches = target_shards.iter().map(|(shard, shard_key)| {
+            let all_searches = target_shards.into_iter().map(|(shard, shard_key)| {
                 let shard_key = shard_key.cloned();
                 shard
                     .core_search(
-                        Arc::clone(&request),
+                        request.clone(),
                         read_consistency,
                         shard_selection.is_shard_id(),
                         timeout,
-                        hw_measurement_acc.clone(),
+                        hw_measurement_acc,
                     )
                     .and_then(move |mut records| async move {
                         if shard_key.is_none() {
@@ -185,7 +186,7 @@ impl Collection {
         let result = self
             .merge_from_shards(
                 all_searches_res,
-                Arc::clone(&request),
+                request.clone(),
                 !shard_selection.is_shard_id(),
             )
             .await;
@@ -260,7 +261,7 @@ impl Collection {
 
         // Merge results from shards in order and deduplicate based on point ID
         let mut top_results: Vec<Vec<ScoredPoint>> = Vec::with_capacity(batch_size);
-        let mut seen_ids = HashSet::new();
+        let mut seen_ids = AHashSet::new();
 
         for (batch_index, request) in request.searches.iter().enumerate() {
             let order = if request.query.is_distance_scored() {

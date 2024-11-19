@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use api::rest::SearchRequestInternal;
 use collection::collection::Collection;
-use collection::config::{CollectionConfig, CollectionParams, WalConfig};
+use collection::config::{CollectionConfigInternal, CollectionParams, WalConfig};
 use collection::operations::point_ops::{
     PointInsertOperationsInternal, PointOperations, PointStructPersisted, VectorStructPersisted,
     WriteOrdering,
@@ -36,13 +36,14 @@ async fn _test_snapshot_and_recover_collection(node_type: NodeType) {
         ..CollectionParams::empty()
     };
 
-    let config = CollectionConfig {
+    let config = CollectionConfigInternal {
         params: collection_params,
         optimizer_config: TEST_OPTIMIZERS_CONFIG.clone(),
         wal_config,
         hnsw_config: Default::default(),
         quantization_config: Default::default(),
         strict_mode_config: Default::default(),
+        uuid: None,
     };
 
     let snapshots_path = Builder::new().prefix("test_snapshots").tempdir().unwrap();
@@ -156,13 +157,14 @@ async fn _test_snapshot_and_recover_collection(node_type: NodeType) {
         score_threshold: None,
     };
 
+    let hw_acc = HwMeasurementAcc::new();
     let reference_result = collection
         .search(
             full_search_request.clone().into(),
             None,
             &ShardSelectorInternal::All,
             None,
-            HwMeasurementAcc::new(),
+            &hw_acc,
         )
         .await
         .unwrap();
@@ -173,10 +175,11 @@ async fn _test_snapshot_and_recover_collection(node_type: NodeType) {
             None,
             &ShardSelectorInternal::All,
             None,
-            HwMeasurementAcc::new(),
+            &hw_acc,
         )
         .await
         .unwrap();
+    hw_acc.discard();
 
     assert_eq!(reference_result.len(), recovered_result.len());
 

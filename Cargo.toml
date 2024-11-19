@@ -1,6 +1,6 @@
 [package]
 name = "qdrant"
-version = "1.12.3"
+version = "1.12.4"
 authors = [
     "Andrey Vasnetsov <andrey@vasnetsov.com>",
     "Qdrant Team <info@qdrant.tech>",
@@ -37,6 +37,7 @@ tokio-tracing = ["tokio/tracing"]
 stacktrace = ["rstack-self"]
 chaos-testing = []
 data-consistency-check = ["collection/data-consistency-check"]
+gpu = ["gpu/gpu"]
 
 [dev-dependencies]
 serde_urlencoded = "0.7"
@@ -103,6 +104,8 @@ segment = { path = "lib/segment" }
 collection = { path = "lib/collection" }
 storage = { path = "lib/storage" }
 api = { path = "lib/api" }
+gpu = { path = "lib/gpu" }
+
 actix-multipart = "0.7.2"
 constant_time_eq = "0.3.1"
 
@@ -152,6 +155,7 @@ used_underscore_binding = "warn"
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(tokio_unstable)'] }
 
 [workspace.dependencies]
+ahash = { version = "0.8.11", features = ["serde"] }
 atomicwrites = "0.4.4"
 bytes = "1.8.0"
 chrono = { version = "0.4.38", features = ["serde"] }
@@ -207,6 +211,7 @@ byteorder = "1.5.0"
 thiserror = "1.0.68"
 bitvec = "1.0.1"
 merge = "0.1.0"
+dashmap = "6.1"
 
 [[bin]]
 name = "schema_generator"

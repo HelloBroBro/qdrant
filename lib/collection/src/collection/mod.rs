@@ -28,8 +28,7 @@ use tokio::sync::{Mutex, RwLock, RwLockWriteGuard};
 use crate::collection::payload_index_schema::PayloadIndexSchema;
 use crate::collection_state::{ShardInfo, State};
 use crate::common::is_ready::IsReady;
-use crate::config::CollectionConfig;
-use crate::operations::cluster_ops::ReshardingDirection;
+use crate::config::CollectionConfigInternal;
 use crate::operations::config_diff::{DiffConfig, OptimizersConfigDiff};
 use crate::operations::shared_storage_config::SharedStorageConfig;
 use crate::operations::types::{CollectionError, CollectionResult, NodeType};
@@ -43,7 +42,6 @@ use crate::shards::replica_set::{
     ChangePeerFromState, ChangePeerState, ReplicaState, ShardReplicaSet,
 };
 use crate::shards::resharding::tasks_pool::ReshardTasksPool;
-use crate::shards::resharding::ReshardKey;
 use crate::shards::shard::{PeerId, ShardId};
 use crate::shards::shard_holder::{shard_not_found_error, LockedShardHolder, ShardHolder};
 use crate::shards::transfer::helpers::check_transfer_conflicts_strict;
@@ -56,7 +54,7 @@ use crate::telemetry::CollectionTelemetry;
 pub struct Collection {
     pub(crate) id: CollectionId,
     pub(crate) shards_holder: Arc<LockedShardHolder>,
-    pub(crate) collection_config: Arc<RwLock<CollectionConfig>>,
+    pub(crate) collection_config: Arc<RwLock<CollectionConfigInternal>>,
     pub(crate) shared_storage_config: Arc<SharedStorageConfig>,
     payload_index_schema: Arc<SaveOnDisk<PayloadIndexSchema>>,
     optimizers_overwrite: Option<OptimizersConfigDiff>,
@@ -96,7 +94,7 @@ impl Collection {
         this_peer_id: PeerId,
         path: &Path,
         snapshots_path: &Path,
-        collection_config: &CollectionConfig,
+        collection_config: &CollectionConfigInternal,
         shared_storage_config: Arc<SharedStorageConfig>,
         shard_distribution: CollectionShardDistribution,
         channel_service: ChannelService,
@@ -217,7 +215,7 @@ impl Collection {
             }
         }
 
-        let collection_config = CollectionConfig::load(path).unwrap_or_else(|err| {
+        let collection_config = CollectionConfigInternal::load(path).unwrap_or_else(|err| {
             panic!(
                 "Can't read collection config due to {}\nat {}",
                 err,
@@ -313,6 +311,10 @@ impl Collection {
 
     pub fn name(&self) -> String {
         self.id.clone()
+    }
+
+    pub async fn uuid(&self) -> Option<uuid::Uuid> {
+        self.collection_config.read().await.uuid
     }
 
     pub async fn get_shard_keys(&self) -> Vec<ShardKey> {
@@ -420,26 +422,16 @@ impl Collection {
         // then `Collection::abort_resharding` call should return an error, so no special handling
         // is needed.
         if current_state == Some(ReplicaState::Resharding) && state == ReplicaState::Dead {
-            let shard_key = shard_holder
-                .get_shard_id_to_key_mapping()
-                .get(&shard_id)
-                .cloned();
-
             drop(shard_holder);
 
-            self.abort_resharding(
-                ReshardKey {
-                    // Always up when setting resharding replica set state
-                    direction: ReshardingDirection::Up,
-                    peer_id,
-                    shard_id,
-                    shard_key,
-                },
-                false,
-            )
-            .await?;
+            let resharding_state = self
+                .resharding_state()
+                .await
+                .filter(|state| state.peer_id == peer_id);
 
-            // TODO(resharding): Abort all resharding transfers!?
+            if let Some(state) = resharding_state {
+                self.abort_resharding(state.key(), false).await?;
+            }
 
             return Ok(());
         }

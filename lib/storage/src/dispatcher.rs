@@ -4,6 +4,7 @@ use std::time::{Duration, Instant};
 
 use collection::config::ShardingMethod;
 use collection::operations::verification::VerificationPass;
+use common::counter::hardware_accumulator::HwMeasurementAcc;
 use common::defaults::CONSENSUS_META_OP_WAIT;
 use segment::types::default_shard_number_per_node_const;
 
@@ -115,6 +116,18 @@ impl Dispatcher {
                             }
                         }
                     }
+
+                    if let Some(uuid) = &op.create_collection.uuid {
+                        log::warn!(
+                            "Collection UUID {uuid} explicitly specified, \
+                             when proposing create collection {} operation, \
+                             new random UUID will be generated instead",
+                            op.collection_name,
+                        );
+                    }
+
+                    op.create_collection.uuid = Some(uuid::Uuid::new_v4());
+
                     CollectionMetaOperations::CreateCollection(op)
                 }
                 CollectionMetaOperations::CreateShardKey(op) => {
@@ -232,5 +245,10 @@ impl Dispatcher {
         } else {
             Ok(())
         }
+    }
+
+    #[must_use]
+    pub fn get_collection_hw_metrics(&self, collection: String) -> Arc<HwMeasurementAcc> {
+        self.toc.get_collection_hw_metrics(collection)
     }
 }

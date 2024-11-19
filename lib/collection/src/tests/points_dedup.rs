@@ -14,7 +14,7 @@ use serde_json::{Map, Value};
 use tempfile::Builder;
 
 use crate::collection::{Collection, RequestShardTransfer};
-use crate::config::{CollectionConfig, CollectionParams, WalConfig};
+use crate::config::{CollectionConfigInternal, CollectionParams, WalConfig};
 use crate::operations::point_ops::{
     PointInsertOperationsInternal, PointOperations, PointStructPersisted, VectorStructPersisted,
 };
@@ -52,13 +52,14 @@ async fn fixture() -> Collection {
         ..CollectionParams::empty()
     };
 
-    let config = CollectionConfig {
+    let config = CollectionConfigInternal {
         params: collection_params,
         optimizer_config: OptimizersConfig::fixture(),
         wal_config,
         hnsw_config: Default::default(),
         quantization_config: Default::default(),
         strict_mode_config: Default::default(),
+        uuid: None,
     };
 
     let collection_dir = Builder::new().prefix("test_collection").tempdir().unwrap();
@@ -241,6 +242,7 @@ async fn test_retrieve_dedup() {
 async fn test_search_dedup() {
     let collection = fixture().await;
 
+    let hw_acc = HwMeasurementAcc::new();
     let points = collection
         .search(
             CoreSearchRequest {
@@ -259,11 +261,12 @@ async fn test_search_dedup() {
             None,
             &ShardSelectorInternal::All,
             None,
-            HwMeasurementAcc::new(),
+            &hw_acc,
         )
         .await
         .expect("failed to search");
     assert!(!points.is_empty(), "expected some points");
+    hw_acc.discard();
 
     let mut seen = HashSet::new();
     for point_id in points.iter().map(|point| point.id) {
